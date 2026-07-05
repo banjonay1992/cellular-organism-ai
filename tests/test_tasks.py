@@ -9,7 +9,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from organism_v01.channels import ChannelLayout
-from organism_v01.tasks import generate_routing_batch
+from organism_v01.tasks import generate_memory_batch, generate_multi_pair_batch, generate_routing_batch
 
 
 class RoutingTaskTests(unittest.TestCase):
@@ -61,6 +61,54 @@ class RoutingTaskTests(unittest.TestCase):
             blocked_neighbors += float(patch.sum())
 
         self.assertGreater(blocked_neighbors, 0.0)
+
+    def test_maze_task_adds_a_wall_with_a_gap(self) -> None:
+        layout = ChannelLayout(hidden_channels=4)
+        batch = generate_routing_batch(
+            batch_size=4,
+            grid_size=16,
+            layout=layout,
+            damage_prob=0.0,
+            maze_barrier=True,
+            seed=555,
+        )
+
+        wall_col = batch.initial.shape[-1] // 2
+        wall = batch.initial[:, layout.blocked, 1:-1, wall_col]
+        self.assertTrue((wall.sum(dim=1) >= wall.shape[1] - 1).all())
+        self.assertEqual(batch.task_name, "maze")
+
+    def test_multi_pair_task_has_multiple_targets(self) -> None:
+        layout = ChannelLayout(hidden_channels=4)
+        batch = generate_multi_pair_batch(
+            batch_size=5,
+            grid_size=14,
+            layout=layout,
+            pair_count=3,
+            seed=808,
+        )
+
+        self.assertEqual(batch.task_name, "multi")
+        self.assertIsNotNone(batch.pair_labels)
+        self.assertEqual(tuple(batch.pair_labels.shape), (5, 3))
+        self.assertEqual(float(batch.sink_mask.sum()), 15.0)
+        self.assertEqual(float(batch.target.sum()), 15.0)
+
+    def test_memory_task_hides_source_after_input_phase(self) -> None:
+        layout = ChannelLayout(hidden_channels=4)
+        batch = generate_memory_batch(
+            batch_size=4,
+            grid_size=12,
+            layout=layout,
+            input_steps=3,
+            seed=909,
+        )
+
+        self.assertEqual(batch.task_name, "memory")
+        self.assertIsNotNone(batch.input_env)
+        self.assertEqual(batch.input_steps, 3)
+        self.assertGreater(float(batch.input_env[:, layout.source_a : layout.source_b + 1].sum()), 0.0)
+        self.assertEqual(float(batch.env[:, layout.source_a : layout.source_b + 1].sum()), 0.0)
 
 
 if __name__ == "__main__":

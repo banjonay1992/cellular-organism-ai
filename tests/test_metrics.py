@@ -9,7 +9,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from organism_v01.channels import ChannelLayout
-from organism_v01.metrics import classification_accuracy, mean_sink_margin, target_peak_accuracy
+from organism_v01.metrics import classification_accuracy, mean_sink_margin, target_peak_accuracy, target_set_accuracy
 from organism_v01.tasks import generate_routing_batch
 
 
@@ -45,6 +45,23 @@ class MetricTests(unittest.TestCase):
         first_label = int(batch.labels[0])
         final_state[0, layout.output_start + first_label, 1, 1] = 10.0
         self.assertLess(target_peak_accuracy(final_state, batch, layout), 1.0)
+
+    def test_target_set_accuracy_requires_every_sink(self) -> None:
+        layout = ChannelLayout(hidden_channels=4)
+        batch = generate_routing_batch(batch_size=6, grid_size=12, layout=layout, seed=79)
+        final_state = torch.zeros_like(batch.initial)
+
+        for item in range(batch.initial.shape[0]):
+            sink_row, sink_col = [int(value) for value in batch.sink_rc[item]]
+            label = int(batch.labels[item])
+            final_state[item, layout.output_start + label, sink_row, sink_col] = 5.0
+
+        self.assertEqual(target_set_accuracy(final_state, batch, layout), 1.0)
+
+        first_label = int(batch.labels[0])
+        first_row, first_col = [int(value) for value in batch.sink_rc[0]]
+        final_state[0, layout.output_start + first_label, first_row, first_col] = -5.0
+        self.assertLess(target_set_accuracy(final_state, batch, layout), 1.0)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ import torch
 from organism_v01.channels import ChannelLayout
 from organism_v01.evaluation import choose_device, evaluate_model, save_json_report, set_seed
 from organism_v01.organism import CellularOrganism
+from organism_v01.tasks import TASK_NAMES
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -18,7 +19,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--grid-size", type=int, default=None)
     parser.add_argument("--rollout-steps", type=int, default=None)
+    parser.add_argument("--task", choices=TASK_NAMES, default=None)
     parser.add_argument("--damage-prob", type=float, default=None)
+    parser.add_argument("--coordinate-fields", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--pair-count", type=int, default=None)
+    parser.add_argument("--memory-input-steps", type=int, default=None)
     parser.add_argument("--field-weight", type=float, default=None)
     parser.add_argument("--localization-weight", type=float, default=None)
     parser.add_argument("--localization-margin", type=float, default=None)
@@ -48,7 +53,11 @@ def main() -> None:
     batch_size = args.batch_size or int(checkpoint_args.get("batch_size", 32))
     grid_size = args.grid_size or int(checkpoint_args.get("grid_size", 16))
     rollout_steps = args.rollout_steps or int(checkpoint_args.get("rollout_steps", 24))
+    task = args.task or str(checkpoint_args.get("task", "routing"))
     damage_prob = args.damage_prob if args.damage_prob is not None else float(checkpoint_args.get("damage_prob", 0.12))
+    coordinate_fields = args.coordinate_fields if args.coordinate_fields is not None else bool(checkpoint_args.get("coordinate_fields", True))
+    pair_count = args.pair_count if args.pair_count is not None else int(checkpoint_args.get("pair_count", 3))
+    memory_input_steps = args.memory_input_steps if args.memory_input_steps is not None else int(checkpoint_args.get("memory_input_steps", 4))
     field_weight = args.field_weight if args.field_weight is not None else float(checkpoint_args.get("field_weight", 0.5))
     localization_weight = args.localization_weight if args.localization_weight is not None else float(checkpoint_args.get("localization_weight", 1.0))
     localization_margin = args.localization_margin if args.localization_margin is not None else float(checkpoint_args.get("localization_margin", 1.0))
@@ -62,6 +71,10 @@ def main() -> None:
         grid_size=grid_size,
         rollout_steps=rollout_steps,
         damage_prob=damage_prob,
+        task=task,
+        coordinate_fields=coordinate_fields,
+        pair_count=pair_count,
+        memory_input_steps=memory_input_steps,
         seed=args.seed,
         device=device,
         field_weight=field_weight,
@@ -76,7 +89,11 @@ def main() -> None:
         "batch_size": batch_size,
         "grid_size": grid_size,
         "rollout_steps": rollout_steps,
+        "task": task,
         "damage_prob": damage_prob,
+        "coordinate_fields": coordinate_fields,
+        "pair_count": pair_count,
+        "memory_input_steps": memory_input_steps,
         "field_weight": field_weight,
         "localization_weight": localization_weight,
         "localization_margin": localization_margin,

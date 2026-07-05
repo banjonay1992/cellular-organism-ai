@@ -14,11 +14,24 @@ from organism_v01.tasks import RoutingBatch
 class OrganismRollout:
     final_state: torch.Tensor
     activity_loss: torch.Tensor
+    frames: torch.Tensor | None = None
 
 
-def clamp_environment(state: torch.Tensor, batch: RoutingBatch, layout: ChannelLayout) -> torch.Tensor:
+def _active_env(batch: RoutingBatch, step_index: int) -> torch.Tensor:
+    if batch.input_env is not None and step_index < batch.input_steps:
+        return batch.input_env
+    return batch.env
+
+
+def clamp_environment(
+    state: torch.Tensor,
+    batch: RoutingBatch,
+    layout: ChannelLayout,
+    *,
+    step_index: int = 0,
+) -> torch.Tensor:
     clamped = state.clone()
-    clamped[:, : layout.env_count] = batch.env
+    clamped[:, : layout.env_count] = _active_env(batch, step_index)
     clamped[:, layout.mutable_slice] = clamped[:, layout.mutable_slice] * batch.alive_mask
     return clamped
 
@@ -32,21 +45,36 @@ class CellularOrganism(nn.Module):
         self.update_scale = update_scale
         self.cell_update = CellUpdate(layout.total_channels, hidden=cell_hidden)
 
-    def forward(self, batch: RoutingBatch, steps: int = 24) -> OrganismRollout:
+    def forward(
+        self,
+        batch: RoutingBatch,
+        steps: int = 24,
+        *,
+        start_state: torch.Tensor | None = None,
+        start_step: int = 0,
+        return_frames: bool = False,
+    ) -> OrganismRollout:
         if steps <= 0:
             raise ValueError("steps must be positive")
 
-        state = clamp_environment(batch.initial, batch, self.layout)
+        state = batch.initial if start_state is None else start_state
+        state = clamp_environment(state, batch, self.layout, step_index=start_step)
         activity_terms: list[torch.Tensor] = []
+        frames: list[torch.Tensor] = []
+        if return_frames:
+            frames.append(state.detach().cpu())
 
-        for _ in range(steps):
+        for offset in range(steps):
+            step_index = start_step + offset
             delta = self.cell_update(state) * self.update_scale
             delta = delta.clone()
             delta[:, : self.layout.env_count] = 0.0
             delta[:, self.layout.mutable_slice] = delta[:, self.layout.mutable_slice] * batch.alive_mask
-            state = clamp_environment(state + delta, batch, self.layout)
+            state = clamp_environment(state + delta, batch, self.layout, step_index=step_index + 1)
             activity_terms.append(delta[:, self.layout.mutable_slice].abs().mean())
+            if return_frames:
+                frames.append(state.detach().cpu())
 
         activity_loss = torch.stack(activity_terms).mean()
-        return OrganismRollout(final_state=state, activity_loss=activity_loss)
-
+        frame_tensor = torch.stack(frames) if return_frames else None
+        return OrganismRollout(final_state=state, activity_loss=activity_loss, frames=frame_tensor)

@@ -8,9 +8,9 @@ import torch
 
 from organism_v01.channels import ChannelLayout
 from organism_v01.evaluation import choose_device, evaluate_model, save_json_report, set_seed
-from organism_v01.metrics import classification_accuracy, compute_loss, mean_sink_margin
+from organism_v01.metrics import classification_accuracy, compute_loss, mean_sink_margin, target_set_accuracy
 from organism_v01.organism import CellularOrganism
-from organism_v01.tasks import generate_routing_batch
+from organism_v01.tasks import TASK_NAMES, generate_task_batch
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -21,7 +21,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rollout-steps", type=int, default=24)
     parser.add_argument("--hidden-channels", type=int, default=8)
     parser.add_argument("--cell-hidden", type=int, default=32)
+    parser.add_argument("--task", choices=TASK_NAMES, default="routing")
     parser.add_argument("--damage-prob", type=float, default=0.12)
+    parser.add_argument("--coordinate-fields", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--pair-count", type=int, default=3)
+    parser.add_argument("--memory-input-steps", type=int, default=4)
     parser.add_argument("--field-weight", type=float, default=0.5)
     parser.add_argument("--localization-weight", type=float, default=1.0)
     parser.add_argument("--localization-margin", type=float, default=1.0)
@@ -70,6 +74,10 @@ def main() -> None:
         grid_size=args.grid_size,
         rollout_steps=args.rollout_steps,
         damage_prob=args.damage_prob,
+        task=args.task,
+        coordinate_fields=args.coordinate_fields,
+        pair_count=args.pair_count,
+        memory_input_steps=args.memory_input_steps,
         seed=args.seed + 10_000,
         device=device,
         field_weight=args.field_weight,
@@ -81,11 +89,15 @@ def main() -> None:
     history: list[dict[str, float | int]] = []
     for step in range(1, args.steps + 1):
         model.train()
-        batch = generate_routing_batch(
+        batch = generate_task_batch(
+            task=args.task,
             batch_size=args.batch_size,
             grid_size=args.grid_size,
             layout=layout,
             damage_prob=args.damage_prob,
+            coordinate_fields=args.coordinate_fields,
+            pair_count=args.pair_count,
+            memory_input_steps=args.memory_input_steps,
             seed=args.seed + 100_000 + step,
             device=device,
         )
@@ -108,6 +120,7 @@ def main() -> None:
 
         if step == 1 or step % args.log_every == 0 or step == args.steps:
             accuracy = classification_accuracy(rollout.final_state.detach(), batch, layout)
+            set_accuracy = target_set_accuracy(rollout.final_state.detach(), batch, layout)
             margin = mean_sink_margin(rollout.final_state.detach(), batch, layout)
             row = {
                 "step": step,
@@ -117,6 +130,7 @@ def main() -> None:
                 "quiet_loss": float(losses["quiet"].item()),
                 "localization_loss": float(losses["localization"].item()),
                 "accuracy": accuracy,
+                "target_set_accuracy": set_accuracy,
                 "sink_margin": margin,
             }
             history.append(row)
@@ -130,6 +144,10 @@ def main() -> None:
         grid_size=args.grid_size,
         rollout_steps=args.rollout_steps,
         damage_prob=args.damage_prob,
+        task=args.task,
+        coordinate_fields=args.coordinate_fields,
+        pair_count=args.pair_count,
+        memory_input_steps=args.memory_input_steps,
         seed=args.seed + 20_000,
         device=device,
         field_weight=args.field_weight,
@@ -139,7 +157,7 @@ def main() -> None:
     )
 
     report = {
-        "version_goal": "v0.1 generated routing with local cellular updates",
+        "version_goal": f"cellular organism generated {args.task} task",
         "device": str(device),
         "config": {
             "steps": args.steps,
@@ -148,7 +166,11 @@ def main() -> None:
             "rollout_steps": args.rollout_steps,
             "hidden_channels": args.hidden_channels,
             "cell_hidden": args.cell_hidden,
+            "task": args.task,
             "damage_prob": args.damage_prob,
+            "coordinate_fields": args.coordinate_fields,
+            "pair_count": args.pair_count,
+            "memory_input_steps": args.memory_input_steps,
             "field_weight": args.field_weight,
             "localization_weight": args.localization_weight,
             "localization_margin": args.localization_margin,
@@ -161,6 +183,7 @@ def main() -> None:
         "trained": trained_metrics,
         "improvement": {
             "accuracy": trained_metrics["accuracy"] - baseline_metrics["accuracy"],
+            "target_set_accuracy": trained_metrics["target_set_accuracy"] - baseline_metrics["target_set_accuracy"],
             "loss": baseline_metrics["loss"] - trained_metrics["loss"],
             "sink_margin": trained_metrics["sink_margin"] - baseline_metrics["sink_margin"],
         },

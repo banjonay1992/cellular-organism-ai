@@ -74,6 +74,68 @@ Useful controls:
 - `erase_sink` should fail target-peak accuracy.
 - `swap_source` should fail.
 
+## v0.2 And v0.3 Probes
+
+Train a variant:
+
+```bash
+PYTHONPATH=src python3 -m organism_v01.train \
+  --task memory \
+  --steps 350 \
+  --batch-size 32 \
+  --grid-size 16 \
+  --rollout-steps 24 \
+  --hidden-channels 8 \
+  --cell-hidden 32 \
+  --damage-prob 0.08 \
+  --memory-input-steps 4 \
+  --save-model outputs/models/organism-v02-memory.pt \
+  --report outputs/reports/train-v02-memory.json
+```
+
+Available tasks:
+
+- `routing`: original single source/sink routing task.
+- `maze`: single source/sink task with a wall and a random gap.
+- `memory`: source is visible only during the input phase, then removed.
+- `multi`: multiple row-aligned source/sink pairs in the same tissue.
+
+Run mid-rollout injury recovery:
+
+```bash
+PYTHONPATH=src python3 -m organism_v01.injury \
+  --model outputs/models/organism-v02-memory.pt \
+  --injury-prob 0.25 \
+  --report outputs/reports/injury-v02-memory.json
+```
+
+Run anti-cheat stress checks:
+
+```bash
+PYTHONPATH=src python3 -m organism_v01.stress \
+  --model outputs/models/organism-v01.pt \
+  --report outputs/reports/stress-v02.json
+```
+
+Render tissue frames:
+
+```bash
+PYTHONPATH=src python3 -m organism_v01.visualize \
+  --model outputs/models/organism-v02-memory.pt \
+  --out-dir outputs/reports/visual-v02-memory
+```
+
+The visualizer writes `frame_*.png`, `rollout.gif`, and `visual-report.json`.
+
+## Latest Observed Results
+
+These are run artifacts, not hardcoded scores:
+
+- Routing v0.1: held-out `target_set_accuracy = 1.0`; 25% mid-run injury recovery stayed at `1.0`.
+- Maze v0.2: held-out `target_set_accuracy = 1.0`; 25% mid-run injury recovery stayed at `1.0`.
+- Memory v0.3 probe: held-out `target_set_accuracy = 1.0`; erasing the source dropped near chance.
+- Multi-pair v0.2: the harder 3-pair damaged setup did not learn in the first run; an easier 2-pair no-damage setup reached held-out `target_set_accuracy = 0.9890625`.
+
 ## Architecture
 
 Each cell shares the same tiny update network. The body is a grid of state vectors:

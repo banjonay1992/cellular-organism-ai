@@ -21,9 +21,13 @@ def classification_accuracy(
     batch: RoutingBatch,
     layout: ChannelLayout,
 ) -> float:
-    logits = output_logits_at_sink(final_state, batch, layout)
-    predictions = logits.argmax(dim=1)
-    return float((predictions == batch.labels).float().mean().item())
+    outputs = final_state[:, layout.output_slice]
+    sink_mask = batch.sink_mask[:, 0].bool()
+    if int(sink_mask.sum().item()) == 0:
+        return 0.0
+    predictions = outputs.argmax(dim=1)
+    targets = batch.target.argmax(dim=1)
+    return float((predictions[sink_mask] == targets[sink_mask]).float().mean().item())
 
 
 def target_peak_accuracy(
@@ -32,16 +36,32 @@ def target_peak_accuracy(
     layout: ChannelLayout,
 ) -> float:
     outputs = final_state[:, layout.output_slice]
-    batch_size, _, height, width = outputs.shape
     predicted_flat = outputs.flatten(1).argmax(dim=1)
-    target_flat = (
-        batch.labels * height * width
-        + batch.sink_rc[:, 0].to(batch.labels.device) * width
-        + batch.sink_rc[:, 1].to(batch.labels.device)
-    )
-    if target_flat.shape[0] != batch_size:
-        raise ValueError("target size does not match batch size")
-    return float((predicted_flat == target_flat).float().mean().item())
+    target_flat = batch.target.flatten(1).bool()
+    return float(target_flat.gather(1, predicted_flat.view(-1, 1)).float().mean().item())
+
+
+def target_set_accuracy(
+    final_state: torch.Tensor,
+    batch: RoutingBatch,
+    layout: ChannelLayout,
+) -> float:
+    outputs = final_state[:, layout.output_slice]
+    predictions = outputs.argmax(dim=1)
+    targets = batch.target.argmax(dim=1)
+    sink_mask = batch.sink_mask[:, 0].bool()
+    if int(sink_mask.sum().item()) == 0:
+        return 0.0
+
+    correct = predictions == targets
+    per_item: list[torch.Tensor] = []
+    for item in range(outputs.shape[0]):
+        item_mask = sink_mask[item]
+        if int(item_mask.sum().item()) == 0:
+            per_item.append(torch.tensor(False, device=outputs.device))
+        else:
+            per_item.append(correct[item][item_mask].all())
+    return float(torch.stack(per_item).float().mean().item())
 
 
 def mean_sink_margin(
@@ -49,10 +69,15 @@ def mean_sink_margin(
     batch: RoutingBatch,
     layout: ChannelLayout,
 ) -> float:
-    logits = output_logits_at_sink(final_state, batch, layout)
-    correct = logits.gather(1, batch.labels.view(-1, 1)).squeeze(1)
-    wrong_index = 1 - batch.labels
-    wrong = logits.gather(1, wrong_index.view(-1, 1)).squeeze(1)
+    outputs = final_state[:, layout.output_slice]
+    sink_mask = batch.sink_mask[:, 0].bool()
+    if int(sink_mask.sum().item()) == 0:
+        return 0.0
+    sink_outputs = outputs.permute(0, 2, 3, 1)[sink_mask]
+    sink_labels = batch.target.argmax(dim=1)[sink_mask]
+    correct = sink_outputs.gather(1, sink_labels.view(-1, 1)).squeeze(1)
+    wrong_index = 1 - sink_labels
+    wrong = sink_outputs.gather(1, wrong_index.view(-1, 1)).squeeze(1)
     return float((correct - wrong).mean().item())
 
 
@@ -79,20 +104,23 @@ def compute_loss(
     activity_weight: float = 1e-3,
 ) -> dict[str, torch.Tensor]:
     outputs = final_state[:, layout.output_slice]
-    logits = output_logits_at_sink(final_state, batch, layout)
-    sink_loss = F.cross_entropy(logits, batch.labels)
+    sink_mask_bool = batch.sink_mask[:, 0].bool()
+    sink_logits = outputs.permute(0, 2, 3, 1)[sink_mask_bool]
+    sink_labels = batch.target.argmax(dim=1)[sink_mask_bool]
+    if sink_logits.numel() == 0:
+        sink_loss = outputs.sum() * 0.0
+    else:
+        sink_loss = F.cross_entropy(sink_logits, sink_labels)
 
     outside_sink = 1.0 - batch.sink_mask.expand_as(outputs)
     quiet_targets = torch.zeros_like(outputs)
     quiet_bce = F.binary_cross_entropy_with_logits(outputs, quiet_targets, reduction="none")
     quiet_loss = (quiet_bce * outside_sink).sum() / outside_sink.sum().clamp_min(1.0)
 
-    label_index = batch.labels.view(-1, 1, 1, 1).expand(-1, 1, outputs.shape[2], outputs.shape[3])
-    correct_map = outputs.gather(1, label_index).squeeze(1)
-    sink_correct = (correct_map * batch.sink_mask.squeeze(1)).sum(dim=(1, 2))
-    outside_correct = correct_map.masked_fill(batch.sink_mask.squeeze(1).bool(), -1e6)
-    outside_peak = outside_correct.flatten(1).amax(dim=1)
-    localization_loss = F.softplus(outside_peak - sink_correct + localization_margin).mean()
+    target_mask = batch.target.bool()
+    target_scores = outputs.masked_fill(~target_mask, 1e6).flatten(1).amin(dim=1)
+    outside_scores = outputs.masked_fill(target_mask, -1e6).flatten(1).amax(dim=1)
+    localization_loss = F.softplus(outside_scores - target_scores + localization_margin).mean()
 
     activity_term = activity_loss * activity_weight
     localization_term = localization_loss * localization_weight

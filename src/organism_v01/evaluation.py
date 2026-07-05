@@ -13,9 +13,10 @@ from organism_v01.metrics import (
     mean_sink_margin,
     output_localization,
     target_peak_accuracy,
+    target_set_accuracy,
 )
 from organism_v01.organism import CellularOrganism
-from organism_v01.tasks import generate_routing_batch
+from organism_v01.tasks import generate_task_batch
 
 
 def choose_device(requested: str) -> torch.device:
@@ -45,6 +46,10 @@ def evaluate_model(
     damage_prob: float,
     seed: int,
     device: torch.device,
+    task: str = "routing",
+    coordinate_fields: bool = True,
+    pair_count: int = 3,
+    memory_input_steps: int = 4,
     field_weight: float = 0.5,
     localization_weight: float = 1.0,
     localization_margin: float = 1.0,
@@ -56,16 +61,21 @@ def evaluate_model(
         "task_loss": 0.0,
         "accuracy": 0.0,
         "target_peak_accuracy": 0.0,
+        "target_set_accuracy": 0.0,
         "sink_margin": 0.0,
         "localization": 0.0,
     }
     with torch.no_grad():
         for index in range(batches):
-            batch = generate_routing_batch(
+            batch = generate_task_batch(
+                task=task,
                 batch_size=batch_size,
                 grid_size=grid_size,
                 layout=layout,
                 damage_prob=damage_prob,
+                coordinate_fields=coordinate_fields,
+                pair_count=pair_count,
+                memory_input_steps=memory_input_steps,
                 seed=seed + index,
                 device=device,
             )
@@ -84,6 +94,7 @@ def evaluate_model(
             totals["task_loss"] += float(losses["task"].item())
             totals["accuracy"] += classification_accuracy(rollout.final_state, batch, layout)
             totals["target_peak_accuracy"] += target_peak_accuracy(rollout.final_state, batch, layout)
+            totals["target_set_accuracy"] += target_set_accuracy(rollout.final_state, batch, layout)
             totals["sink_margin"] += mean_sink_margin(rollout.final_state, batch, layout)
             totals["localization"] += output_localization(rollout.final_state, batch, layout)
 
