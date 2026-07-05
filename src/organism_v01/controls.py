@@ -181,6 +181,8 @@ def main() -> None:
     model = CellularOrganism(
         layout=layout,
         cell_hidden=int(checkpoint_args.get("cell_hidden", 64)),
+        update_rule=str(checkpoint_args.get("update_rule", "standard")),
+        message_slots=int(checkpoint_args.get("message_slots", 8)),
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
 

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
-from organism_v01.cell import CellUpdate
+from organism_v01.cell import UPDATE_RULES, CellUpdate, GatedMessageCellUpdate
 from organism_v01.channels import ChannelLayout
 from organism_v01.tasks import RoutingBatch
 
@@ -39,11 +39,29 @@ def clamp_environment(
 class CellularOrganism(nn.Module):
     """A recurrent grid of tiny shared cell updates."""
 
-    def __init__(self, layout: ChannelLayout, cell_hidden: int = 64, update_scale: float = 1.0) -> None:
+    def __init__(
+        self,
+        layout: ChannelLayout,
+        cell_hidden: int = 64,
+        update_scale: float = 1.0,
+        update_rule: str = "standard",
+        message_slots: int = 8,
+    ) -> None:
         super().__init__()
+        if update_rule not in UPDATE_RULES:
+            raise ValueError(f"update_rule must be one of {UPDATE_RULES}")
         self.layout = layout
         self.update_scale = update_scale
-        self.cell_update = CellUpdate(layout.total_channels, hidden=cell_hidden)
+        self.update_rule = update_rule
+        self.message_slots = message_slots
+        if update_rule == "standard":
+            self.cell_update = CellUpdate(layout.total_channels, hidden=cell_hidden)
+        else:
+            self.cell_update = GatedMessageCellUpdate(
+                layout.total_channels,
+                hidden=cell_hidden,
+                message_slots=message_slots,
+            )
 
     def forward(
         self,

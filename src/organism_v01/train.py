@@ -7,6 +7,7 @@ from typing import Any
 import torch
 
 from organism_v01.channels import ChannelLayout
+from organism_v01.cell import UPDATE_RULES
 from organism_v01.evaluation import choose_device, evaluate_model, save_json_report, set_seed
 from organism_v01.metrics import classification_accuracy, compute_loss, mean_sink_margin, target_set_accuracy
 from organism_v01.organism import CellularOrganism
@@ -24,6 +25,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hidden-channels", type=int, default=8)
     parser.add_argument("--route-channels", type=int, default=0)
     parser.add_argument("--cell-hidden", type=int, default=32)
+    parser.add_argument("--update-rule", choices=UPDATE_RULES, default="standard")
+    parser.add_argument("--message-slots", type=int, default=8)
     parser.add_argument("--task", choices=TASK_NAMES, default="routing")
     parser.add_argument("--curriculum", choices=CURRICULA, default="none")
     parser.add_argument("--damage-prob", type=float, default=0.12)
@@ -109,6 +112,8 @@ def load_initial_model(
     expected_hidden_channels: int,
     expected_route_channels: int,
     expected_cell_hidden: int,
+    expected_update_rule: str,
+    expected_message_slots: int,
 ) -> None:
     if init_model is None:
         return
@@ -117,6 +122,8 @@ def load_initial_model(
     checkpoint_hidden_channels = int(checkpoint.get("layout", {}).get("hidden_channels", expected_hidden_channels))
     checkpoint_route_channels = int(checkpoint.get("layout", {}).get("route_channels", 0))
     checkpoint_cell_hidden = int(checkpoint.get("args", {}).get("cell_hidden", expected_cell_hidden))
+    checkpoint_update_rule = str(checkpoint.get("args", {}).get("update_rule", "standard"))
+    checkpoint_message_slots = int(checkpoint.get("args", {}).get("message_slots", expected_message_slots))
     if checkpoint_hidden_channels != expected_hidden_channels:
         raise ValueError(
             f"init checkpoint hidden_channels={checkpoint_hidden_channels} "
@@ -132,6 +139,16 @@ def load_initial_model(
             f"init checkpoint route_channels={checkpoint_route_channels} "
             f"does not match requested {expected_route_channels}"
         )
+    if checkpoint_update_rule != expected_update_rule:
+        raise ValueError(
+            f"init checkpoint update_rule={checkpoint_update_rule} "
+            f"does not match requested {expected_update_rule}"
+        )
+    if expected_update_rule == "gated_message" and checkpoint_message_slots != expected_message_slots:
+        raise ValueError(
+            f"init checkpoint message_slots={checkpoint_message_slots} "
+            f"does not match requested {expected_message_slots}"
+        )
     model.load_state_dict(checkpoint["model_state_dict"])
 
 
@@ -144,7 +161,12 @@ def main() -> None:
     set_seed(args.seed)
 
     layout = ChannelLayout(hidden_channels=args.hidden_channels, route_channels=args.route_channels)
-    model = CellularOrganism(layout=layout, cell_hidden=args.cell_hidden).to(device)
+    model = CellularOrganism(
+        layout=layout,
+        cell_hidden=args.cell_hidden,
+        update_rule=args.update_rule,
+        message_slots=args.message_slots,
+    ).to(device)
     load_initial_model(
         model,
         init_model=args.init_model,
@@ -152,6 +174,8 @@ def main() -> None:
         expected_hidden_channels=args.hidden_channels,
         expected_route_channels=args.route_channels,
         expected_cell_hidden=args.cell_hidden,
+        expected_update_rule=args.update_rule,
+        expected_message_slots=args.message_slots,
     )
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
@@ -265,6 +289,8 @@ def main() -> None:
             "hidden_channels": args.hidden_channels,
             "route_channels": args.route_channels,
             "cell_hidden": args.cell_hidden,
+            "update_rule": args.update_rule,
+            "message_slots": args.message_slots,
             "task": args.task,
             "curriculum": args.curriculum,
             "damage_prob": args.damage_prob,

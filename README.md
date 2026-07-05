@@ -139,6 +139,7 @@ These are run artifacts, not hardcoded scores:
 - Multi-pair v0.3: warm-starting from the 2-pair checkpoint and fine-tuning on 3 spaced pairs with 10% static damage reached held-out `target_set_accuracy = 0.99296875`; 20% mid-run injury recovery reached `0.984375`.
 - Multi-pair v0.4 adjacent: removing the spacing crutch with 3 adjacent-capable pairs, 10% static damage, and no route cues reached held-out `target_set_accuracy = 0.98125`; 20% mid-run injury recovery reached `0.9708333333333333`.
 - Multi-pair v0.4 crossing: uncued reverse/crossing assignments did not clear in this architecture. Adding 3 learned-visible route-cue channels, one per pair, reached held-out `target_set_accuracy = 0.96796875`; 20% mid-run injury recovery reached `0.9583333333333334`. Controls after fixing route-cue sink erasure: normal `0.9609375`, erase-source `0.13802083333333334`, erase-sink `0.07942708333333333`, swap-source `0.0`.
+- Multi-pair v0.5 uncued crossing benchmark: the gate is now explicit and rejects route-cued checkpoints. The standard adjacent checkpoint reached held-out `target_set_accuracy = 0.52734375` on uncued reverse crossing, so it fails. A first learned internal message-slot/gated update also failed: small gated checkpoint held out at `0.3385416666666667`; larger gated checkpoint held out at `0.2552083333333333`. Controls still dropped under ablation, so the failure is not a control leak; the missing piece is stable all-pair binding.
 
 Example 3-pair damaged training path:
 
@@ -198,6 +199,38 @@ PYTHONPATH=src python3 -m organism_v01.train \
   --report outputs/reports/train-v04-cross-cued.json
 ```
 
+Run the v0.5 uncued crossing benchmark:
+
+```bash
+PYTHONPATH=src python3 -m organism_v01.benchmark_v05 \
+  --model outputs/models/organism-v05-gated.pt \
+  --batches 12 \
+  --report outputs/reports/benchmark-v05-gated.json
+```
+
+Train the first v0.5 gated-message candidate:
+
+```bash
+PYTHONPATH=src python3 -m organism_v01.train \
+  --task multi \
+  --curriculum multi_pair \
+  --steps 1200 \
+  --batch-size 32 \
+  --grid-size 16 \
+  --rollout-steps 40 \
+  --hidden-channels 24 \
+  --cell-hidden 64 \
+  --update-rule gated_message \
+  --message-slots 8 \
+  --damage-prob 0.10 \
+  --pair-count 3 \
+  --min-pair-spacing 1 \
+  --sink-assignment reverse \
+  --lr 0.0012 \
+  --save-model outputs/models/organism-v05-gated.pt \
+  --report outputs/reports/train-v05-gated.json
+```
+
 ## Architecture
 
 Each cell shares the same tiny update network. The body is a grid of state vectors:
@@ -211,3 +244,7 @@ Each cell shares the same tiny update network. The body is a grid of state vecto
 - output A/B channels
 
 Cells only see their local 3x3 neighborhood. Immutable environment channels are clamped after each step, and damaged cells cannot carry hidden or output state.
+
+The default update rule is `standard`. The experimental `gated_message` update
+adds transient message slots, local message mixing, and learned gates. It is not
+yet sufficient for uncued reverse crossing.

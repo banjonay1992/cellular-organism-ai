@@ -49,7 +49,12 @@ def main() -> None:
     checkpoint_args = _checkpoint_args(checkpoint)
     layout = ChannelLayout(**checkpoint.get("layout", {"hidden_channels": 16}))
     cell_hidden = int(checkpoint_args.get("cell_hidden", 64))
-    model = CellularOrganism(layout=layout, cell_hidden=cell_hidden).to(device)
+    model = CellularOrganism(
+        layout=layout,
+        cell_hidden=cell_hidden,
+        update_rule=str(checkpoint_args.get("update_rule", "standard")),
+        message_slots=int(checkpoint_args.get("message_slots", 8)),
+    ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
 
     batch_size = args.batch_size or int(checkpoint_args.get("batch_size", 32))
