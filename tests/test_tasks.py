@@ -215,6 +215,49 @@ class RoutingTaskTests(unittest.TestCase):
                 seed=813,
             )
 
+    def test_rule_cue_marks_assignment_without_pair_route_channels(self) -> None:
+        layout = ChannelLayout(hidden_channels=4, rule_channels=1)
+        reverse = generate_multi_pair_batch(
+            batch_size=4,
+            grid_size=12,
+            layout=layout,
+            pair_count=3,
+            sink_assignment="reverse",
+            seed=815,
+        )
+        cycle = generate_multi_pair_batch(
+            batch_size=4,
+            grid_size=12,
+            layout=layout,
+            pair_count=3,
+            sink_assignment="cycle",
+            seed=815,
+        )
+
+        self.assertEqual(layout.route_channels, 0)
+        self.assertTrue(torch.equal(reverse.env[:, layout.rule_slice], reverse.initial[:, layout.rule_slice]))
+        self.assertTrue(torch.equal(cycle.env[:, layout.rule_slice], cycle.initial[:, layout.rule_slice]))
+        self.assertTrue(torch.equal(reverse.env[:, layout.rule_slice], torch.full_like(reverse.env[:, layout.rule_slice], -1.0)))
+        self.assertTrue(torch.equal(cycle.env[:, layout.rule_slice], torch.ones_like(cycle.env[:, layout.rule_slice])))
+        self.assertFalse(torch.equal(reverse.env, cycle.env))
+        self.assertFalse(torch.equal(reverse.target, cycle.target))
+
+    def test_rule_cue_can_be_one_hot_when_multiple_channels_are_available(self) -> None:
+        layout = ChannelLayout(hidden_channels=4, rule_channels=3)
+        batch = generate_multi_pair_batch(
+            batch_size=2,
+            grid_size=12,
+            layout=layout,
+            pair_count=3,
+            sink_assignment="cycle",
+            seed=816,
+        )
+
+        cue = batch.env[:, layout.rule_slice]
+        self.assertEqual(float(cue[:, 0].sum()), 0.0)
+        self.assertEqual(float(cue[:, 1].sum()), 0.0)
+        self.assertEqual(float(cue[:, 2].sum()), float(cue[:, 2].numel()))
+
     def test_memory_task_hides_source_after_input_phase(self) -> None:
         layout = ChannelLayout(hidden_channels=4)
         batch = generate_memory_batch(

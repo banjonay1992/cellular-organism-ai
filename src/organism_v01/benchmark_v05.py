@@ -32,6 +32,8 @@ def load_model(
     layout = ChannelLayout(**checkpoint.get("layout", {"hidden_channels": 8}))
     if layout.route_channels != 0:
         raise ValueError("v0.5 benchmark is uncued: checkpoint route_channels must be 0")
+    if layout.rule_channels != 0:
+        raise ValueError("v0.5 benchmark is uncued: checkpoint rule_channels must be 0")
 
     model = CellularOrganism(
         layout=layout,

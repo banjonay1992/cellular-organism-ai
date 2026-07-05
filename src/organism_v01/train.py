@@ -19,7 +19,7 @@ from organism_v01.metrics import (
 from organism_v01.organism import CellularOrganism
 from organism_v01.tasks import SINK_ASSIGNMENTS, TASK_NAMES, generate_task_batch
 
-CURRICULA = ("none", "multi_pair", "binding")
+CURRICULA = ("none", "multi_pair", "binding", "rule_binding")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -30,6 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rollout-steps", type=int, default=24)
     parser.add_argument("--hidden-channels", type=int, default=8)
     parser.add_argument("--route-channels", type=int, default=0)
+    parser.add_argument("--rule-channels", type=int, default=0)
     parser.add_argument("--cell-hidden", type=int, default=32)
     parser.add_argument("--update-rule", choices=UPDATE_RULES, default="standard")
     parser.add_argument("--message-slots", type=int, default=8)
@@ -66,9 +67,11 @@ def curriculum_batch_params(args: argparse.Namespace, step: int) -> dict[str, fl
 
     sink_assignment = args.sink_assignment
 
-    if args.curriculum in {"multi_pair", "binding"}:
+    if args.curriculum in {"multi_pair", "binding", "rule_binding"}:
         if args.task != "multi":
             raise ValueError(f"--curriculum {args.curriculum} requires --task multi")
+        if args.curriculum == "rule_binding" and int(getattr(args, "rule_channels", 0)) < 1:
+            raise ValueError("--curriculum rule_binding requires --rule-channels >= 1")
         progress = step / max(args.steps, 1)
         task = "multi"
         if args.curriculum == "multi_pair":
@@ -87,7 +90,7 @@ def curriculum_batch_params(args: argparse.Namespace, step: int) -> dict[str, fl
             else:
                 pair_count = args.pair_count
                 damage_prob = args.damage_prob
-        else:
+        elif args.curriculum == "binding":
             if progress < 0.15:
                 pair_count = 1
                 sink_assignment = "aligned"
@@ -112,6 +115,31 @@ def curriculum_batch_params(args: argparse.Namespace, step: int) -> dict[str, fl
                 pair_count = args.pair_count
                 sink_assignment = args.sink_assignment
                 damage_prob = args.damage_prob
+        else:
+            if progress < 0.15:
+                pair_count = 1
+                sink_assignment = "aligned"
+                damage_prob = 0.0
+            elif progress < 0.30:
+                pair_count = min(2, args.pair_count)
+                sink_assignment = "aligned"
+                damage_prob = 0.0
+            elif progress < 0.45:
+                pair_count = min(2, args.pair_count)
+                sink_assignment = "reverse"
+                damage_prob = 0.0
+            elif progress < 0.60:
+                pair_count = args.pair_count
+                sink_assignment = "reverse"
+                damage_prob = 0.0
+            elif progress < 0.75:
+                pair_count = args.pair_count
+                sink_assignment = "cycle"
+                damage_prob = 0.0
+            else:
+                pair_count = args.pair_count
+                sink_assignment = "reverse" if step % 2 else "cycle"
+                damage_prob = args.damage_prob
 
     return {
         "task": task,
@@ -135,6 +163,7 @@ def checkpoint_payload(
         "layout": {
             "hidden_channels": layout.hidden_channels,
             "route_channels": layout.route_channels,
+            "rule_channels": layout.rule_channels,
         },
         "args": vars(args),
         "metrics": metrics,
@@ -152,6 +181,7 @@ def load_initial_model(
     expected_update_rule: str,
     expected_message_slots: int,
     expected_tag_slots: int,
+    expected_rule_channels: int = 0,
 ) -> None:
     if init_model is None:
         return
@@ -159,6 +189,7 @@ def load_initial_model(
     checkpoint = torch.load(Path(init_model), map_location=device, weights_only=False)
     checkpoint_hidden_channels = int(checkpoint.get("layout", {}).get("hidden_channels", expected_hidden_channels))
     checkpoint_route_channels = int(checkpoint.get("layout", {}).get("route_channels", 0))
+    checkpoint_rule_channels = int(checkpoint.get("layout", {}).get("rule_channels", 0))
     checkpoint_cell_hidden = int(checkpoint.get("args", {}).get("cell_hidden", expected_cell_hidden))
     checkpoint_update_rule = str(checkpoint.get("args", {}).get("update_rule", "standard"))
     checkpoint_message_slots = int(checkpoint.get("args", {}).get("message_slots", expected_message_slots))
@@ -177,6 +208,11 @@ def load_initial_model(
         raise ValueError(
             f"init checkpoint route_channels={checkpoint_route_channels} "
             f"does not match requested {expected_route_channels}"
+        )
+    if checkpoint_rule_channels != expected_rule_channels:
+        raise ValueError(
+            f"init checkpoint rule_channels={checkpoint_rule_channels} "
+            f"does not match requested {expected_rule_channels}"
         )
     if checkpoint_update_rule != expected_update_rule:
         raise ValueError(
@@ -204,7 +240,11 @@ def main() -> None:
     device = choose_device(args.device)
     set_seed(args.seed)
 
-    layout = ChannelLayout(hidden_channels=args.hidden_channels, route_channels=args.route_channels)
+    layout = ChannelLayout(
+        hidden_channels=args.hidden_channels,
+        route_channels=args.route_channels,
+        rule_channels=args.rule_channels,
+    )
     model = CellularOrganism(
         layout=layout,
         cell_hidden=args.cell_hidden,
@@ -218,6 +258,7 @@ def main() -> None:
         device=device,
         expected_hidden_channels=args.hidden_channels,
         expected_route_channels=args.route_channels,
+        expected_rule_channels=args.rule_channels,
         expected_cell_hidden=args.cell_hidden,
         expected_update_rule=args.update_rule,
         expected_message_slots=args.message_slots,
@@ -346,6 +387,7 @@ def main() -> None:
             "rollout_steps": args.rollout_steps,
             "hidden_channels": args.hidden_channels,
             "route_channels": args.route_channels,
+            "rule_channels": args.rule_channels,
             "cell_hidden": args.cell_hidden,
             "update_rule": args.update_rule,
             "message_slots": args.message_slots,

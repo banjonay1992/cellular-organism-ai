@@ -6,6 +6,12 @@ import torch
 
 from organism_v01.channels import ChannelLayout
 
+RULE_CUE_VALUES = {
+    "aligned": 0.0,
+    "reverse": -1.0,
+    "cycle": 1.0,
+}
+
 
 @dataclass(frozen=True)
 class RoutingBatch:
@@ -128,6 +134,21 @@ def _apply_maze_barrier(
         blocked[item, 1 : height - 1, wall_col] = True
         blocked[item, gap_row, wall_col] = False
     blocked[protected] = False
+
+
+def _apply_rule_cue(state: torch.Tensor, layout: ChannelLayout, sink_assignment: str) -> None:
+    if layout.rule_channels == 0:
+        return
+    if sink_assignment not in RULE_CUE_VALUES:
+        raise ValueError(f"sink_assignment must be one of {SINK_ASSIGNMENTS}")
+
+    if layout.rule_channels == 1:
+        state[:, layout.rule_start] = RULE_CUE_VALUES[sink_assignment]
+        return
+
+    assignment_index = {"aligned": 0, "reverse": 1, "cycle": 2}[sink_assignment]
+    state[:, layout.rule_slice] = 0.0
+    state[:, layout.rule_start + min(assignment_index, layout.rule_channels - 1)] = 1.0
 
 
 def _finalize_batch(
@@ -280,6 +301,7 @@ def generate_multi_pair_batch(
         coordinate_fields=coordinate_fields,
         generator=generator,
     )
+    _apply_rule_cue(state, layout, sink_assignment)
     target = torch.zeros(batch_size, layout.output_count, height, width)
     pair_labels = torch.zeros(batch_size, pair_count, dtype=torch.long)
     pair_source_rc = torch.zeros(batch_size, pair_count, 2, dtype=torch.long)

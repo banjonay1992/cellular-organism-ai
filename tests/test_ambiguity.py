@@ -45,6 +45,24 @@ class AmbiguityTests(unittest.TestCase):
         self.assertEqual(report["conflicting_target_items"], 0)
         self.assertEqual(report["conflict_rate_given_identical_input"], 0.0)
 
+    def test_rule_cue_makes_reverse_and_cycle_inputs_distinct(self) -> None:
+        report = audit_assignment_ambiguity(
+            assignment_a="reverse",
+            assignment_b="cycle",
+            seeds=1,
+            start_seed=80,
+            batch_size=4,
+            grid_size=12,
+            pair_count=3,
+            min_pair_spacing=1,
+            damage_prob=0.10,
+            rule_channels=1,
+        )
+
+        self.assertEqual(report["identical_input_items"], 0)
+        self.assertEqual(report["conflicting_target_items"], 0)
+        self.assertEqual(report["conflict_rate_given_identical_input"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

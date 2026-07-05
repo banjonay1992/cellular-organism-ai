@@ -7,7 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from organism_v01.channels import ChannelLayout
-from organism_v01.controls import erase_sink_from_input, erase_source, swap_source_label
+from organism_v01.controls import erase_rule_cue, erase_sink_from_input, erase_source, swap_source_label
 from organism_v01.tasks import generate_memory_batch, generate_multi_pair_batch, generate_routing_batch
 
 
@@ -59,6 +59,24 @@ class ControlTransformTests(unittest.TestCase):
         self.assertEqual(float(transformed.initial[:, layout.sink].sum()), 0.0)
         self.assertEqual(float(transformed.initial[:, layout.route_slice].masked_select(sink_mask).sum()), 0.0)
         self.assertEqual(float(transformed.env[:, layout.route_slice].masked_select(sink_mask).sum()), 0.0)
+
+    def test_erase_rule_cue_preserves_sources_and_targets(self) -> None:
+        layout = ChannelLayout(hidden_channels=4, rule_channels=1)
+        batch = generate_multi_pair_batch(
+            batch_size=4,
+            grid_size=12,
+            layout=layout,
+            pair_count=3,
+            sink_assignment="reverse",
+            seed=96,
+        )
+        transformed = erase_rule_cue(batch, layout)
+
+        self.assertLess(float(batch.env[:, layout.rule_slice].sum()), 0.0)
+        self.assertEqual(float(transformed.initial[:, layout.rule_slice].sum()), 0.0)
+        self.assertEqual(float(transformed.env[:, layout.rule_slice].sum()), 0.0)
+        self.assertTrue((transformed.initial[:, layout.source_a : layout.sink + 1] == batch.initial[:, layout.source_a : layout.sink + 1]).all())
+        self.assertTrue((transformed.target == batch.target).all())
 
 
 if __name__ == "__main__":

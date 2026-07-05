@@ -13,6 +13,7 @@ class ChannelLayout:
 
     hidden_channels: int = 16
     route_channels: int = 0
+    rule_channels: int = 0
 
     source_a: int = 0
     source_b: int = 1
@@ -24,7 +25,7 @@ class ChannelLayout:
 
     @property
     def env_count(self) -> int:
-        return 7 + self.route_channels
+        return 7 + self.route_channels + self.rule_channels
 
     @property
     def route_start(self) -> int:
@@ -33,6 +34,14 @@ class ChannelLayout:
     @property
     def route_slice(self) -> slice:
         return slice(self.route_start, self.route_start + self.route_channels)
+
+    @property
+    def rule_start(self) -> int:
+        return self.route_start + self.route_channels
+
+    @property
+    def rule_slice(self) -> slice:
+        return slice(self.rule_start, self.rule_start + self.rule_channels)
 
     @property
     def hidden_start(self) -> int:

@@ -11,6 +11,8 @@ from organism_v01.cell import (
     GatedMessageCellUpdate,
     MatchingReadoutCellUpdate,
     RankBindingCellUpdate,
+    RankSlotRuleCuedCellUpdate,
+    RuleCuedMatchingReadoutCellUpdate,
     SelfTaggingCellUpdate,
     SinkStabilizedRankCellUpdate,
 )
@@ -100,7 +102,7 @@ class CellularOrganism(nn.Module):
                 sink=layout.sink,
                 hidden=cell_hidden,
             )
-        else:
+        elif update_rule == "matching_readout":
             self.cell_update = MatchingReadoutCellUpdate(
                 layout.total_channels,
                 hidden_start=layout.hidden_start,
@@ -109,6 +111,32 @@ class CellularOrganism(nn.Module):
                 source_b=layout.source_b,
                 sink=layout.sink,
                 output_start=layout.output_start,
+                hidden=cell_hidden,
+            )
+        elif update_rule == "rule_cued_matching_readout":
+            self.cell_update = RuleCuedMatchingReadoutCellUpdate(
+                layout.total_channels,
+                hidden_start=layout.hidden_start,
+                hidden_channels=layout.hidden_channels,
+                source_a=layout.source_a,
+                source_b=layout.source_b,
+                sink=layout.sink,
+                output_start=layout.output_start,
+                rule_start=layout.rule_start,
+                rule_channels=layout.rule_channels,
+                hidden=cell_hidden,
+            )
+        else:
+            self.cell_update = RankSlotRuleCuedCellUpdate(
+                layout.total_channels,
+                hidden_start=layout.hidden_start,
+                hidden_channels=layout.hidden_channels,
+                source_a=layout.source_a,
+                source_b=layout.source_b,
+                sink=layout.sink,
+                output_start=layout.output_start,
+                rule_start=layout.rule_start,
+                rule_channels=layout.rule_channels,
                 hidden=cell_hidden,
             )
 

@@ -22,6 +22,7 @@ def audit_assignment_ambiguity(
     min_pair_spacing: int,
     damage_prob: float,
     hidden_channels: int = 4,
+    rule_channels: int = 0,
 ) -> dict[str, Any]:
     if assignment_a not in SINK_ASSIGNMENTS:
         raise ValueError(f"assignment_a must be one of {SINK_ASSIGNMENTS}")
@@ -30,7 +31,7 @@ def audit_assignment_ambiguity(
     if seeds <= 0:
         raise ValueError("seeds must be positive")
 
-    layout = ChannelLayout(hidden_channels=hidden_channels)
+    layout = ChannelLayout(hidden_channels=hidden_channels, rule_channels=rule_channels)
     total_items = seeds * batch_size
     identical_input_items = 0
     conflicting_target_items = 0
@@ -93,6 +94,7 @@ def audit_assignment_ambiguity(
         "pair_count": pair_count,
         "min_pair_spacing": min_pair_spacing,
         "damage_prob": damage_prob,
+        "rule_channels": rule_channels,
         "total_items": total_items,
         "identical_input_items": identical_input_items,
         "conflicting_target_items": conflicting_target_items,
@@ -113,6 +115,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-pair-spacing", type=int, default=1)
     parser.add_argument("--damage-prob", type=float, default=0.10)
     parser.add_argument("--hidden-channels", type=int, default=4)
+    parser.add_argument("--rule-channels", type=int, default=0)
     parser.add_argument("--report", default="outputs/reports/assignment-ambiguity.json")
     return parser
 
@@ -130,6 +133,7 @@ def main() -> None:
         min_pair_spacing=args.min_pair_spacing,
         damage_prob=args.damage_prob,
         hidden_channels=args.hidden_channels,
+        rule_channels=args.rule_channels,
     )
     save_json_report(args.report, report)
     print(report)

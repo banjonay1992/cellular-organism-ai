@@ -13,3 +13,4 @@ outputs/reports/**/*.json
 outputs/reports/**/*.png
 outputs/reports/**/*.gif
 work/runs/
+work/

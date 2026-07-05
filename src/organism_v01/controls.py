@@ -71,6 +71,18 @@ def swap_source_label(batch: RoutingBatch, layout: ChannelLayout) -> RoutingBatc
     return replace(batch, initial=initial, env=env, input_env=input_env)
 
 
+def erase_rule_cue(batch: RoutingBatch, layout: ChannelLayout) -> RoutingBatch:
+    initial = batch.initial.clone()
+    env = batch.env.clone()
+    input_env = None if batch.input_env is None else batch.input_env.clone()
+    if layout.rule_channels:
+        initial[:, layout.rule_slice] = 0.0
+        env[:, layout.rule_slice] = 0.0
+        if input_env is not None:
+            input_env[:, layout.rule_slice] = 0.0
+    return replace(batch, initial=initial, env=env, input_env=input_env)
+
+
 CONTROLS: dict[str, ControlTransform] = {
     "normal": lambda batch, layout: batch,
     "erase_source": erase_source,

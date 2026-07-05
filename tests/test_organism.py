@@ -209,6 +209,77 @@ class OrganismTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(losses["total"]))
         self.assertGreater(grad_norm, 0.0)
 
+    def test_rule_cued_matching_readout_uses_rule_context_and_backpropagates(self) -> None:
+        torch.manual_seed(19)
+        layout = ChannelLayout(hidden_channels=14, rule_channels=1)
+        batch = generate_routing_batch(batch_size=3, grid_size=10, layout=layout, seed=19)
+        model = CellularOrganism(
+            layout=layout,
+            cell_hidden=16,
+            update_rule="rule_cued_matching_readout",
+        )
+
+        rollout = model(batch, steps=12)
+        losses = compute_loss(
+            rollout.final_state,
+            batch,
+            layout,
+            activity_loss=rollout.activity_loss,
+        )
+        losses["total"].backward()
+        grad_norm = sum(
+            float(parameter.grad.abs().sum())
+            for parameter in model.parameters()
+            if parameter.grad is not None
+        )
+        output_energy = (rollout.final_state[:, layout.output_slice] * batch.sink_mask).detach().abs().sum()
+
+        self.assertTrue(torch.allclose(rollout.final_state[:, : layout.env_count], batch.env))
+        self.assertGreater(float(output_energy), 0.0)
+        self.assertTrue(torch.isfinite(losses["total"]))
+        self.assertGreater(grad_norm, 0.0)
+
+    def test_rule_cued_matching_readout_requires_rule_channels(self) -> None:
+        layout = ChannelLayout(hidden_channels=14)
+
+        with self.assertRaises(ValueError):
+            CellularOrganism(
+                layout=layout,
+                cell_hidden=16,
+                update_rule="rule_cued_matching_readout",
+            )
+
+    def test_rank_slot_rule_cued_readout_moves_slot_signals_to_sink(self) -> None:
+        torch.manual_seed(20)
+        layout = ChannelLayout(hidden_channels=20, rule_channels=1)
+        batch = generate_routing_batch(batch_size=3, grid_size=10, layout=layout, seed=20)
+        model = CellularOrganism(
+            layout=layout,
+            cell_hidden=16,
+            update_rule="rank_slot_rule_cued",
+        )
+
+        rollout = model(batch, steps=12)
+        losses = compute_loss(
+            rollout.final_state,
+            batch,
+            layout,
+            activity_loss=rollout.activity_loss,
+        )
+        losses["total"].backward()
+        grad_norm = sum(
+            float(parameter.grad.abs().sum())
+            for parameter in model.parameters()
+            if parameter.grad is not None
+        )
+        slot_channels = slice(layout.hidden_start + 12, layout.hidden_start + 18)
+        slot_energy = (rollout.final_state[:, slot_channels] * batch.sink_mask).detach().abs().sum()
+
+        self.assertTrue(torch.allclose(rollout.final_state[:, : layout.env_count], batch.env))
+        self.assertGreater(float(slot_energy), 0.0)
+        self.assertTrue(torch.isfinite(losses["total"]))
+        self.assertGreater(grad_norm, 0.0)
+
     def test_rollout_returns_frames_and_can_continue(self) -> None:
         torch.manual_seed(12)
         layout = ChannelLayout(hidden_channels=4)
