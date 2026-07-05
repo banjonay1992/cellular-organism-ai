@@ -164,6 +164,25 @@ class RoutingTaskTests(unittest.TestCase):
                 sink_row, sink_col = [int(value) for value in batch.pair_sink_rc[item, pair_index]]
                 self.assertEqual(float(batch.target[item, label, sink_row, sink_col]), 1.0)
 
+    def test_cycle_sink_assignment_rotates_sink_rows(self) -> None:
+        layout = ChannelLayout(hidden_channels=4)
+        batch = generate_multi_pair_batch(
+            batch_size=6,
+            grid_size=12,
+            layout=layout,
+            pair_count=3,
+            min_pair_spacing=1,
+            sink_assignment="cycle",
+            seed=814,
+        )
+
+        self.assertEqual(batch.task_name, "multi_cross")
+        self.assertIsNotNone(batch.pair_source_rc)
+        self.assertIsNotNone(batch.pair_sink_rc)
+        source_rows = batch.pair_source_rc[:, :, 0]
+        sink_rows = batch.pair_sink_rc[:, :, 0]
+        self.assertTrue(torch.equal(sink_rows, torch.roll(source_rows, shifts=-1, dims=1)))
+
     def test_route_cues_mark_matching_source_and_sink(self) -> None:
         layout = ChannelLayout(hidden_channels=4, route_channels=3)
         batch = generate_multi_pair_batch(

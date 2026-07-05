@@ -86,6 +86,7 @@ class TrainCurriculumTests(unittest.TestCase):
                 expected_cell_hidden=16,
                 expected_update_rule="standard",
                 expected_message_slots=8,
+                expected_tag_slots=4,
             )
 
         for source_parameter, target_parameter in zip(source.parameters(), target.parameters(), strict=True):
@@ -122,6 +123,46 @@ class TrainCurriculumTests(unittest.TestCase):
                     expected_cell_hidden=16,
                     expected_update_rule="gated_message",
                     expected_message_slots=3,
+                    expected_tag_slots=4,
+                )
+
+    def test_load_initial_model_rejects_self_tagging_slot_mismatch(self) -> None:
+        layout = ChannelLayout(hidden_channels=4)
+        source = CellularOrganism(
+            layout=layout,
+            cell_hidden=16,
+            update_rule="self_tagging",
+            tag_slots=2,
+        )
+        target = CellularOrganism(
+            layout=layout,
+            cell_hidden=16,
+            update_rule="self_tagging",
+            tag_slots=3,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "checkpoint.pt"
+            torch.save(
+                {
+                    "model_state_dict": source.state_dict(),
+                    "layout": {"hidden_channels": 4, "route_channels": 0},
+                    "args": {"cell_hidden": 16, "update_rule": "self_tagging", "tag_slots": 2},
+                },
+                path,
+            )
+
+            with self.assertRaises(ValueError):
+                load_initial_model(
+                    target,
+                    init_model=str(path),
+                    device=torch.device("cpu"),
+                    expected_hidden_channels=4,
+                    expected_route_channels=0,
+                    expected_cell_hidden=16,
+                    expected_update_rule="self_tagging",
+                    expected_message_slots=8,
+                    expected_tag_slots=3,
                 )
 
 

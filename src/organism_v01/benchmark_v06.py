@@ -13,10 +13,11 @@ from organism_v01.injury import evaluate_dynamic_injury
 from organism_v01.organism import CellularOrganism
 
 
-V05_THRESHOLDS = {
-    "heldout_target_set_accuracy": 0.90,
-    "injury_target_set_accuracy": 0.85,
-    "normal_control_target_set_accuracy": 0.90,
+V06_THRESHOLDS = {
+    "reverse_target_set_accuracy": 0.65,
+    "injury_target_set_accuracy": 0.55,
+    "cycle_target_set_accuracy": 0.45,
+    "normal_control_target_set_accuracy": 0.65,
     "erase_source_max_target_set_accuracy": 0.35,
     "erase_sink_max_target_set_accuracy": 0.35,
     "swap_source_max_target_set_accuracy": 0.10,
@@ -31,7 +32,7 @@ def load_model(
     checkpoint_args = dict(checkpoint.get("args", {}))
     layout = ChannelLayout(**checkpoint.get("layout", {"hidden_channels": 8}))
     if layout.route_channels != 0:
-        raise ValueError("v0.5 benchmark is uncued: checkpoint route_channels must be 0")
+        raise ValueError("v0.6 benchmark is uncued: checkpoint route_channels must be 0")
 
     model = CellularOrganism(
         layout=layout,
@@ -44,43 +45,46 @@ def load_model(
     return model, layout, checkpoint_args
 
 
-def summarize_v05_result(
-    heldout: dict[str, float],
+def summarize_v06_result(
+    reverse: dict[str, float],
     injury: dict[str, float],
+    cycle: dict[str, float],
     controls: dict[str, dict[str, float]],
 ) -> dict[str, Any]:
     checks = {
-        "heldout_target_set_accuracy": heldout["target_set_accuracy"]
-        >= V05_THRESHOLDS["heldout_target_set_accuracy"],
+        "reverse_target_set_accuracy": reverse["target_set_accuracy"]
+        >= V06_THRESHOLDS["reverse_target_set_accuracy"],
         "injury_target_set_accuracy": injury["target_set_accuracy"]
-        >= V05_THRESHOLDS["injury_target_set_accuracy"],
+        >= V06_THRESHOLDS["injury_target_set_accuracy"],
+        "cycle_target_set_accuracy": cycle["target_set_accuracy"]
+        >= V06_THRESHOLDS["cycle_target_set_accuracy"],
         "normal_control_target_set_accuracy": controls["normal"]["target_set_accuracy"]
-        >= V05_THRESHOLDS["normal_control_target_set_accuracy"],
+        >= V06_THRESHOLDS["normal_control_target_set_accuracy"],
         "erase_source_target_set_accuracy": controls["erase_source"]["target_set_accuracy"]
-        <= V05_THRESHOLDS["erase_source_max_target_set_accuracy"],
+        <= V06_THRESHOLDS["erase_source_max_target_set_accuracy"],
         "erase_sink_target_set_accuracy": controls["erase_sink"]["target_set_accuracy"]
-        <= V05_THRESHOLDS["erase_sink_max_target_set_accuracy"],
+        <= V06_THRESHOLDS["erase_sink_max_target_set_accuracy"],
         "swap_source_target_set_accuracy": controls["swap_source"]["target_set_accuracy"]
-        <= V05_THRESHOLDS["swap_source_max_target_set_accuracy"],
+        <= V06_THRESHOLDS["swap_source_max_target_set_accuracy"],
     }
     return {
         "passed": all(checks.values()),
         "checks": checks,
-        "thresholds": V05_THRESHOLDS,
+        "thresholds": V06_THRESHOLDS,
     }
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run the v0.5 uncued crossing benchmark.")
+    parser = argparse.ArgumentParser(description="Run the v0.6 self-tagging uncued binding benchmark.")
     parser.add_argument("--model", required=True)
     parser.add_argument("--batches", type=int, default=24)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--grid-size", type=int, default=None)
     parser.add_argument("--rollout-steps", type=int, default=None)
     parser.add_argument("--injury-prob", type=float, default=0.2)
-    parser.add_argument("--seed", type=int, default=10500)
+    parser.add_argument("--seed", type=int, default=11600)
     parser.add_argument("--device", default="auto")
-    parser.add_argument("--report", default="outputs/reports/benchmark-v05.json")
+    parser.add_argument("--report", default="outputs/reports/benchmark-v06.json")
     return parser
 
 
@@ -106,7 +110,6 @@ def main() -> None:
         "coordinate_fields": True,
         "pair_count": 3,
         "min_pair_spacing": 1,
-        "sink_assignment": "reverse",
         "memory_input_steps": 4,
         "field_weight": field_weight,
         "localization_weight": localization_weight,
@@ -114,11 +117,12 @@ def main() -> None:
         "activity_weight": activity_weight,
     }
 
-    heldout = evaluate_model(
+    reverse = evaluate_model(
         model,
         layout,
         batches=args.batches,
         rollout_steps=rollout_steps,
+        sink_assignment="reverse",
         seed=args.seed,
         device=device,
         **common,
@@ -130,6 +134,7 @@ def main() -> None:
         pre_steps=max(1, rollout_steps // 2),
         post_steps=max(1, rollout_steps - max(1, rollout_steps // 2)),
         injury_prob=args.injury_prob,
+        sink_assignment="reverse",
         seed=args.seed + 20_000,
         device=device,
         **common,
@@ -141,46 +146,48 @@ def main() -> None:
             transform=transform,
             batches=max(8, args.batches // 2),
             rollout_steps=rollout_steps,
+            sink_assignment="reverse",
             seed=args.seed + 40_000 + index * 10_000,
             device=device,
             **common,
         )
         for index, (name, transform) in enumerate(CONTROLS.items())
     }
-    stress = {
-        "pair_count_2": evaluate_model(
-            model,
-            layout,
-            batches=max(6, args.batches // 4),
-            rollout_steps=rollout_steps,
-            seed=args.seed + 80_000,
-            device=device,
-            **{**common, "pair_count": 2},
-        ),
-        "pair_count_4": evaluate_model(
-            model,
-            layout,
-            batches=max(6, args.batches // 4),
-            rollout_steps=rollout_steps,
-            seed=args.seed + 90_000,
-            device=device,
-            **{**common, "pair_count": 4},
-        ),
-        "larger_grid": evaluate_model(
-            model,
-            layout,
-            batches=max(6, args.batches // 4),
-            rollout_steps=rollout_steps,
-            seed=args.seed + 100_000,
-            device=device,
-            **{**common, "grid_size": grid_size + 4},
-        ),
-    }
-    summary = summarize_v05_result(heldout, injury, controls)
+    cycle = evaluate_model(
+        model,
+        layout,
+        batches=max(8, args.batches // 2),
+        rollout_steps=rollout_steps,
+        sink_assignment="cycle",
+        seed=args.seed + 80_000,
+        device=device,
+        **common,
+    )
+    pair_count_2 = evaluate_model(
+        model,
+        layout,
+        batches=max(6, args.batches // 4),
+        rollout_steps=rollout_steps,
+        sink_assignment="reverse",
+        seed=args.seed + 90_000,
+        device=device,
+        **{**common, "pair_count": 2},
+    )
+    larger_grid = evaluate_model(
+        model,
+        layout,
+        batches=max(6, args.batches // 4),
+        rollout_steps=rollout_steps,
+        sink_assignment="reverse",
+        seed=args.seed + 100_000,
+        device=device,
+        **{**common, "grid_size": grid_size + 4},
+    )
+    summary = summarize_v06_result(reverse, injury, cycle, controls)
     report = {
         "model": args.model,
         "seed": args.seed,
-        "benchmark": "v0.5_uncued_reverse_crossing",
+        "benchmark": "v0.6_uncued_self_tagging_binding",
         "config": {
             "batches": args.batches,
             "batch_size": batch_size,
@@ -189,10 +196,14 @@ def main() -> None:
             "injury_prob": args.injury_prob,
             **common,
         },
-        "heldout": heldout,
+        "reverse": reverse,
         "injury": injury,
+        "cycle": cycle,
         "controls": controls,
-        "stress": stress,
+        "stress": {
+            "pair_count_2": pair_count_2,
+            "larger_grid": larger_grid,
+        },
         "summary": summary,
     }
     save_json_report(args.report, report)

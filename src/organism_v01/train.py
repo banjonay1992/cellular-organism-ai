@@ -27,6 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cell-hidden", type=int, default=32)
     parser.add_argument("--update-rule", choices=UPDATE_RULES, default="standard")
     parser.add_argument("--message-slots", type=int, default=8)
+    parser.add_argument("--tag-slots", type=int, default=4)
     parser.add_argument("--task", choices=TASK_NAMES, default="routing")
     parser.add_argument("--curriculum", choices=CURRICULA, default="none")
     parser.add_argument("--damage-prob", type=float, default=0.12)
@@ -114,6 +115,7 @@ def load_initial_model(
     expected_cell_hidden: int,
     expected_update_rule: str,
     expected_message_slots: int,
+    expected_tag_slots: int,
 ) -> None:
     if init_model is None:
         return
@@ -124,6 +126,7 @@ def load_initial_model(
     checkpoint_cell_hidden = int(checkpoint.get("args", {}).get("cell_hidden", expected_cell_hidden))
     checkpoint_update_rule = str(checkpoint.get("args", {}).get("update_rule", "standard"))
     checkpoint_message_slots = int(checkpoint.get("args", {}).get("message_slots", expected_message_slots))
+    checkpoint_tag_slots = int(checkpoint.get("args", {}).get("tag_slots", expected_tag_slots))
     if checkpoint_hidden_channels != expected_hidden_channels:
         raise ValueError(
             f"init checkpoint hidden_channels={checkpoint_hidden_channels} "
@@ -149,6 +152,11 @@ def load_initial_model(
             f"init checkpoint message_slots={checkpoint_message_slots} "
             f"does not match requested {expected_message_slots}"
         )
+    if expected_update_rule == "self_tagging" and checkpoint_tag_slots != expected_tag_slots:
+        raise ValueError(
+            f"init checkpoint tag_slots={checkpoint_tag_slots} "
+            f"does not match requested {expected_tag_slots}"
+        )
     model.load_state_dict(checkpoint["model_state_dict"])
 
 
@@ -166,6 +174,7 @@ def main() -> None:
         cell_hidden=args.cell_hidden,
         update_rule=args.update_rule,
         message_slots=args.message_slots,
+        tag_slots=args.tag_slots,
     ).to(device)
     load_initial_model(
         model,
@@ -176,6 +185,7 @@ def main() -> None:
         expected_cell_hidden=args.cell_hidden,
         expected_update_rule=args.update_rule,
         expected_message_slots=args.message_slots,
+        expected_tag_slots=args.tag_slots,
     )
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
@@ -291,6 +301,7 @@ def main() -> None:
             "cell_hidden": args.cell_hidden,
             "update_rule": args.update_rule,
             "message_slots": args.message_slots,
+            "tag_slots": args.tag_slots,
             "task": args.task,
             "curriculum": args.curriculum,
             "damage_prob": args.damage_prob,

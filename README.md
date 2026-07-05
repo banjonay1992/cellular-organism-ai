@@ -140,6 +140,7 @@ These are run artifacts, not hardcoded scores:
 - Multi-pair v0.4 adjacent: removing the spacing crutch with 3 adjacent-capable pairs, 10% static damage, and no route cues reached held-out `target_set_accuracy = 0.98125`; 20% mid-run injury recovery reached `0.9708333333333333`.
 - Multi-pair v0.4 crossing: uncued reverse/crossing assignments did not clear in this architecture. Adding 3 learned-visible route-cue channels, one per pair, reached held-out `target_set_accuracy = 0.96796875`; 20% mid-run injury recovery reached `0.9583333333333334`. Controls after fixing route-cue sink erasure: normal `0.9609375`, erase-source `0.13802083333333334`, erase-sink `0.07942708333333333`, swap-source `0.0`.
 - Multi-pair v0.5 uncued crossing benchmark: the gate is now explicit and rejects route-cued checkpoints. The standard adjacent checkpoint reached held-out `target_set_accuracy = 0.52734375` on uncued reverse crossing, so it fails. A first learned internal message-slot/gated update also failed: small gated checkpoint held out at `0.3385416666666667`; larger gated checkpoint held out at `0.2552083333333333`. Controls still dropped under ablation, so the failure is not a control leak; the missing piece is stable all-pair binding.
+- Multi-pair v0.6 self-tagging benchmark: arbitrary random unmarked permutations are intentionally not used because they are not determined by the input. Instead v0.6 adds a deterministic cyclic assignment stress probe and a `self_tagging` update rule with persistent internal tag slots. The old adjacent checkpoint reached reverse `0.51953125` and cycle `0.265625`. The first self-tagging checkpoint reached reverse `0.23697916666666666`, cycle `0.24609375`; after lower-rate continuation it reached reverse `0.2421875`, injury `0.27734375`, cycle `0.2109375`. Result: self-tagging as implemented does not solve uncued binding.
 
 Example 3-pair damaged training path:
 
@@ -231,6 +232,38 @@ PYTHONPATH=src python3 -m organism_v01.train \
   --report outputs/reports/train-v05-gated.json
 ```
 
+Run the v0.6 self-tagging benchmark:
+
+```bash
+PYTHONPATH=src python3 -m organism_v01.benchmark_v06 \
+  --model outputs/models/organism-v06-self-tagging.pt \
+  --batches 12 \
+  --report outputs/reports/benchmark-v06-self-tagging-continued.json
+```
+
+Train the first v0.6 self-tagging candidate:
+
+```bash
+PYTHONPATH=src python3 -m organism_v01.train \
+  --task multi \
+  --curriculum multi_pair \
+  --steps 1000 \
+  --batch-size 32 \
+  --grid-size 16 \
+  --rollout-steps 40 \
+  --hidden-channels 24 \
+  --cell-hidden 64 \
+  --update-rule self_tagging \
+  --tag-slots 6 \
+  --damage-prob 0.10 \
+  --pair-count 3 \
+  --min-pair-spacing 1 \
+  --sink-assignment reverse \
+  --lr 0.0012 \
+  --save-model outputs/models/organism-v06-self-tagging.pt \
+  --report outputs/reports/train-v06-self-tagging.json
+```
+
 ## Architecture
 
 Each cell shares the same tiny update network. The body is a grid of state vectors:
@@ -247,4 +280,7 @@ Cells only see their local 3x3 neighborhood. Immutable environment channels are 
 
 The default update rule is `standard`. The experimental `gated_message` update
 adds transient message slots, local message mixing, and learned gates. It is not
-yet sufficient for uncued reverse crossing.
+yet sufficient for uncued reverse crossing. The experimental `self_tagging`
+update adds persistent internal tag slots inside hidden tissue channels, plus
+trainable tag diffusion and tag readout. It improved some two-pair behavior in
+training but still failed the three-pair uncued binding benchmark.

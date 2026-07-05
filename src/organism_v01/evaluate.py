@@ -54,6 +54,7 @@ def main() -> None:
         cell_hidden=cell_hidden,
         update_rule=str(checkpoint_args.get("update_rule", "standard")),
         message_slots=int(checkpoint_args.get("message_slots", 8)),
+        tag_slots=int(checkpoint_args.get("tag_slots", 4)),
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
 

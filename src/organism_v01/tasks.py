@@ -293,7 +293,12 @@ def generate_multi_pair_batch(
             min_pair_spacing=min_pair_spacing,
             generator=generator,
         )
-        sink_rows = rows if sink_assignment == "aligned" else rows.flip(0)
+        if sink_assignment == "aligned":
+            sink_rows = rows
+        elif sink_assignment == "reverse":
+            sink_rows = rows.flip(0)
+        else:
+            sink_rows = torch.roll(rows, shifts=-1)
         for pair_index, row_tensor in enumerate(rows):
             source_row = int(row_tensor.item())
             sink_row = int(sink_rows[pair_index].item())
@@ -328,7 +333,7 @@ def generate_multi_pair_batch(
         source_rc=source_rc,
         sink_rc=sink_rc,
         layout=layout,
-        task_name="multi_cross" if sink_assignment == "reverse" else "multi",
+        task_name="multi_cross" if sink_assignment != "aligned" else "multi",
         pair_labels=pair_labels,
         pair_source_rc=pair_source_rc,
         pair_sink_rc=pair_sink_rc,
@@ -386,7 +391,7 @@ def generate_memory_batch(
 
 
 TASK_NAMES = ("routing", "maze", "memory", "multi")
-SINK_ASSIGNMENTS = ("aligned", "reverse")
+SINK_ASSIGNMENTS = ("aligned", "reverse", "cycle")
 
 
 def generate_task_batch(

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
-from organism_v01.cell import UPDATE_RULES, CellUpdate, GatedMessageCellUpdate
+from organism_v01.cell import UPDATE_RULES, CellUpdate, GatedMessageCellUpdate, SelfTaggingCellUpdate
 from organism_v01.channels import ChannelLayout
 from organism_v01.tasks import RoutingBatch
 
@@ -46,6 +46,7 @@ class CellularOrganism(nn.Module):
         update_scale: float = 1.0,
         update_rule: str = "standard",
         message_slots: int = 8,
+        tag_slots: int = 4,
     ) -> None:
         super().__init__()
         if update_rule not in UPDATE_RULES:
@@ -54,13 +55,22 @@ class CellularOrganism(nn.Module):
         self.update_scale = update_scale
         self.update_rule = update_rule
         self.message_slots = message_slots
+        self.tag_slots = tag_slots
         if update_rule == "standard":
             self.cell_update = CellUpdate(layout.total_channels, hidden=cell_hidden)
-        else:
+        elif update_rule == "gated_message":
             self.cell_update = GatedMessageCellUpdate(
                 layout.total_channels,
                 hidden=cell_hidden,
                 message_slots=message_slots,
+            )
+        else:
+            self.cell_update = SelfTaggingCellUpdate(
+                layout.total_channels,
+                hidden_start=layout.hidden_start,
+                hidden_channels=layout.hidden_channels,
+                hidden=cell_hidden,
+                tag_slots=tag_slots,
             )
 
     def forward(

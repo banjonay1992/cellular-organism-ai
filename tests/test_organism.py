@@ -86,6 +86,35 @@ class OrganismTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(losses["total"]))
         self.assertGreater(grad_norm, 0.0)
 
+    def test_self_tagging_rollout_backpropagates(self) -> None:
+        torch.manual_seed(15)
+        layout = ChannelLayout(hidden_channels=6)
+        batch = generate_routing_batch(batch_size=3, grid_size=10, layout=layout, seed=15)
+        model = CellularOrganism(
+            layout=layout,
+            cell_hidden=16,
+            update_rule="self_tagging",
+            tag_slots=3,
+        )
+
+        rollout = model(batch, steps=2)
+        losses = compute_loss(
+            rollout.final_state,
+            batch,
+            layout,
+            activity_loss=rollout.activity_loss,
+        )
+        losses["total"].backward()
+        grad_norm = sum(
+            float(parameter.grad.abs().sum())
+            for parameter in model.parameters()
+            if parameter.grad is not None
+        )
+
+        self.assertTrue(torch.allclose(rollout.final_state[:, : layout.env_count], batch.env))
+        self.assertTrue(torch.isfinite(losses["total"]))
+        self.assertGreater(grad_norm, 0.0)
+
     def test_rollout_returns_frames_and_can_continue(self) -> None:
         torch.manual_seed(12)
         layout = ChannelLayout(hidden_channels=4)
