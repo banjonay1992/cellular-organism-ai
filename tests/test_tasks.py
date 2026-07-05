@@ -123,6 +123,79 @@ class RoutingTaskTests(unittest.TestCase):
         self.assertEqual(float(batch.sink_mask.sum()), 5.0)
         self.assertEqual(float(batch.target.sum()), 5.0)
 
+    def test_multi_pair_can_generate_adjacent_rows_without_spacing_crutch(self) -> None:
+        layout = ChannelLayout(hidden_channels=4)
+        batch = generate_multi_pair_batch(
+            batch_size=8,
+            grid_size=10,
+            layout=layout,
+            pair_count=3,
+            min_pair_spacing=1,
+            seed=0,
+        )
+
+        self.assertIsNotNone(batch.pair_source_rc)
+        rows = batch.pair_source_rc[:, :, 0]
+        gaps = rows[:, 1:] - rows[:, :-1]
+        self.assertTrue((gaps == 1).any())
+
+    def test_reverse_sink_assignment_creates_crossing_targets(self) -> None:
+        layout = ChannelLayout(hidden_channels=4)
+        batch = generate_multi_pair_batch(
+            batch_size=6,
+            grid_size=12,
+            layout=layout,
+            pair_count=3,
+            min_pair_spacing=1,
+            sink_assignment="reverse",
+            seed=811,
+        )
+
+        self.assertEqual(batch.task_name, "multi_cross")
+        self.assertIsNotNone(batch.pair_source_rc)
+        self.assertIsNotNone(batch.pair_sink_rc)
+        source_rows = batch.pair_source_rc[:, :, 0]
+        sink_rows = batch.pair_sink_rc[:, :, 0]
+        self.assertTrue(torch.equal(sink_rows, source_rows.flip(1)))
+
+        for item in range(batch.initial.shape[0]):
+            for pair_index in range(3):
+                label = int(batch.pair_labels[item, pair_index])
+                sink_row, sink_col = [int(value) for value in batch.pair_sink_rc[item, pair_index]]
+                self.assertEqual(float(batch.target[item, label, sink_row, sink_col]), 1.0)
+
+    def test_route_cues_mark_matching_source_and_sink(self) -> None:
+        layout = ChannelLayout(hidden_channels=4, route_channels=3)
+        batch = generate_multi_pair_batch(
+            batch_size=4,
+            grid_size=12,
+            layout=layout,
+            pair_count=3,
+            min_pair_spacing=1,
+            sink_assignment="reverse",
+            seed=812,
+        )
+
+        for item in range(batch.initial.shape[0]):
+            for pair_index in range(3):
+                route_channel = layout.route_start + pair_index
+                source_row, source_col = [int(value) for value in batch.pair_source_rc[item, pair_index]]
+                sink_row, sink_col = [int(value) for value in batch.pair_sink_rc[item, pair_index]]
+                self.assertEqual(float(batch.initial[item, route_channel, source_row, source_col]), 1.0)
+                self.assertEqual(float(batch.initial[item, route_channel, sink_row, sink_col]), 1.0)
+
+    def test_route_cues_require_enough_channels(self) -> None:
+        layout = ChannelLayout(hidden_channels=4, route_channels=2)
+
+        with self.assertRaises(ValueError):
+            generate_multi_pair_batch(
+                batch_size=1,
+                grid_size=12,
+                layout=layout,
+                pair_count=3,
+                seed=813,
+            )
+
     def test_memory_task_hides_source_after_input_phase(self) -> None:
         layout = ChannelLayout(hidden_channels=4)
         batch = generate_memory_batch(

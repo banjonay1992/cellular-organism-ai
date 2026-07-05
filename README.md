@@ -98,7 +98,8 @@ Available tasks:
 - `routing`: original single source/sink routing task.
 - `maze`: single source/sink task with a wall and a random gap.
 - `memory`: source is visible only during the input phase, then removed.
-- `multi`: multiple row-aligned source/sink pairs in the same tissue.
+- `multi`: multiple source/sink pairs in the same tissue. Use `--min-pair-spacing 1`
+  for adjacent rows and `--sink-assignment reverse` for crossing assignments.
 
 Run mid-rollout injury recovery:
 
@@ -136,6 +137,8 @@ These are run artifacts, not hardcoded scores:
 - Memory v0.3 probe: held-out `target_set_accuracy = 1.0`; erasing the source dropped near chance.
 - Multi-pair v0.2: the harder 3-pair damaged setup did not learn in the first run; an easier 2-pair no-damage setup reached held-out `target_set_accuracy = 0.9890625`.
 - Multi-pair v0.3: warm-starting from the 2-pair checkpoint and fine-tuning on 3 spaced pairs with 10% static damage reached held-out `target_set_accuracy = 0.99296875`; 20% mid-run injury recovery reached `0.984375`.
+- Multi-pair v0.4 adjacent: removing the spacing crutch with 3 adjacent-capable pairs, 10% static damage, and no route cues reached held-out `target_set_accuracy = 0.98125`; 20% mid-run injury recovery reached `0.9708333333333333`.
+- Multi-pair v0.4 crossing: uncued reverse/crossing assignments did not clear in this architecture. Adding 3 learned-visible route-cue channels, one per pair, reached held-out `target_set_accuracy = 0.96796875`; 20% mid-run injury recovery reached `0.9583333333333334`. Controls after fixing route-cue sink erasure: normal `0.9609375`, erase-source `0.13802083333333334`, erase-sink `0.07942708333333333`, swap-source `0.0`.
 
 Example 3-pair damaged training path:
 
@@ -173,6 +176,28 @@ PYTHONPATH=src python3 -m organism_v01.train \
   --report outputs/reports/train-v03-multi3.json
 ```
 
+Example route-cued crossing run:
+
+```bash
+PYTHONPATH=src python3 -m organism_v01.train \
+  --task multi \
+  --steps 700 \
+  --batch-size 32 \
+  --grid-size 16 \
+  --rollout-steps 40 \
+  --hidden-channels 12 \
+  --route-channels 3 \
+  --cell-hidden 48 \
+  --damage-prob 0.10 \
+  --pair-count 3 \
+  --min-pair-spacing 1 \
+  --sink-assignment reverse \
+  --lr 0.00055 \
+  --init-model outputs/models/organism-v04-cross-cued.pt \
+  --save-model outputs/models/organism-v04-cross-cued.pt \
+  --report outputs/reports/train-v04-cross-cued.json
+```
+
 ## Architecture
 
 Each cell shares the same tiny update network. The body is a grid of state vectors:
@@ -181,6 +206,7 @@ Each cell shares the same tiny update network. The body is a grid of state vecto
 - sink marker
 - damage/alive channels
 - x/y chemical fields
+- optional route-cue channels
 - hidden tissue channels
 - output A/B channels
 

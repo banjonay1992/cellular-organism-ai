@@ -252,6 +252,7 @@ def generate_multi_pair_batch(
     layout: ChannelLayout,
     pair_count: int = 3,
     min_pair_spacing: int = 1,
+    sink_assignment: str = "aligned",
     damage_prob: float = 0.08,
     coordinate_fields: bool = True,
     seed: int | None = None,
@@ -264,6 +265,10 @@ def generate_multi_pair_batch(
         raise ValueError("pair_count must be at least 1 for multi-pair tasks")
     if pair_count > grid_size - 2:
         raise ValueError("pair_count cannot exceed the number of interior rows")
+    if sink_assignment not in SINK_ASSIGNMENTS:
+        raise ValueError(f"sink_assignment must be one of {SINK_ASSIGNMENTS}")
+    if layout.route_channels and pair_count > layout.route_channels:
+        raise ValueError("pair_count cannot exceed route_channels when route cues are enabled")
 
     generator = _make_generator(seed)
     height = width = grid_size
@@ -288,23 +293,29 @@ def generate_multi_pair_batch(
             min_pair_spacing=min_pair_spacing,
             generator=generator,
         )
+        sink_rows = rows if sink_assignment == "aligned" else rows.flip(0)
         for pair_index, row_tensor in enumerate(rows):
-            row = int(row_tensor.item())
+            source_row = int(row_tensor.item())
+            sink_row = int(sink_rows[pair_index].item())
             label = _randint(generator, 0, 2)
             source_col = 1
             sink_col = width - 2
             source_channel = layout.source_a if label == 0 else layout.source_b
 
             pair_labels[item, pair_index] = label
-            pair_source_rc[item, pair_index] = torch.tensor([row, source_col])
-            pair_sink_rc[item, pair_index] = torch.tensor([row, sink_col])
-            state[item, source_channel, row, source_col] = 1.0
-            state[item, layout.sink, row, sink_col] = 1.0
-            target[item, label, row, sink_col] = 1.0
-            blocked[item, row, source_col] = False
-            blocked[item, row, sink_col] = False
-            protected[item, row, source_col] = True
-            protected[item, row, sink_col] = True
+            pair_source_rc[item, pair_index] = torch.tensor([source_row, source_col])
+            pair_sink_rc[item, pair_index] = torch.tensor([sink_row, sink_col])
+            state[item, source_channel, source_row, source_col] = 1.0
+            state[item, layout.sink, sink_row, sink_col] = 1.0
+            if layout.route_channels:
+                route_channel = layout.route_start + pair_index
+                state[item, route_channel, source_row, source_col] = 1.0
+                state[item, route_channel, sink_row, sink_col] = 1.0
+            target[item, label, sink_row, sink_col] = 1.0
+            blocked[item, source_row, source_col] = False
+            blocked[item, sink_row, sink_col] = False
+            protected[item, source_row, source_col] = True
+            protected[item, sink_row, sink_col] = True
 
     labels = pair_labels[:, 0].clone()
     source_rc = pair_source_rc[:, 0].clone()
@@ -317,7 +328,7 @@ def generate_multi_pair_batch(
         source_rc=source_rc,
         sink_rc=sink_rc,
         layout=layout,
-        task_name="multi",
+        task_name="multi_cross" if sink_assignment == "reverse" else "multi",
         pair_labels=pair_labels,
         pair_source_rc=pair_source_rc,
         pair_sink_rc=pair_sink_rc,
@@ -375,6 +386,7 @@ def generate_memory_batch(
 
 
 TASK_NAMES = ("routing", "maze", "memory", "multi")
+SINK_ASSIGNMENTS = ("aligned", "reverse")
 
 
 def generate_task_batch(
@@ -387,6 +399,7 @@ def generate_task_batch(
     coordinate_fields: bool = True,
     pair_count: int = 3,
     min_pair_spacing: int = 1,
+    sink_assignment: str = "aligned",
     memory_input_steps: int = 4,
     seed: int | None = None,
     device: torch.device | str | None = None,
@@ -430,6 +443,7 @@ def generate_task_batch(
             layout=layout,
             pair_count=pair_count,
             min_pair_spacing=min_pair_spacing,
+            sink_assignment=sink_assignment,
             damage_prob=damage_prob,
             coordinate_fields=coordinate_fields,
             seed=seed,

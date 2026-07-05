@@ -9,7 +9,7 @@ import torch
 from organism_v01.channels import ChannelLayout
 from organism_v01.evaluation import choose_device, evaluate_model, save_json_report, set_seed
 from organism_v01.organism import CellularOrganism
-from organism_v01.tasks import TASK_NAMES
+from organism_v01.tasks import SINK_ASSIGNMENTS, TASK_NAMES
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -24,6 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--coordinate-fields", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--pair-count", type=int, default=None)
     parser.add_argument("--min-pair-spacing", type=int, default=None)
+    parser.add_argument("--sink-assignment", choices=SINK_ASSIGNMENTS, default=None)
     parser.add_argument("--memory-input-steps", type=int, default=None)
     parser.add_argument("--field-weight", type=float, default=None)
     parser.add_argument("--localization-weight", type=float, default=None)
@@ -59,6 +60,7 @@ def main() -> None:
     coordinate_fields = args.coordinate_fields if args.coordinate_fields is not None else bool(checkpoint_args.get("coordinate_fields", True))
     pair_count = args.pair_count if args.pair_count is not None else int(checkpoint_args.get("pair_count", 3))
     min_pair_spacing = args.min_pair_spacing if args.min_pair_spacing is not None else int(checkpoint_args.get("min_pair_spacing", 1))
+    sink_assignment = args.sink_assignment or str(checkpoint_args.get("sink_assignment", "aligned"))
     memory_input_steps = args.memory_input_steps if args.memory_input_steps is not None else int(checkpoint_args.get("memory_input_steps", 4))
     field_weight = args.field_weight if args.field_weight is not None else float(checkpoint_args.get("field_weight", 0.5))
     localization_weight = args.localization_weight if args.localization_weight is not None else float(checkpoint_args.get("localization_weight", 1.0))
@@ -77,6 +79,7 @@ def main() -> None:
         coordinate_fields=coordinate_fields,
         pair_count=pair_count,
         min_pair_spacing=min_pair_spacing,
+        sink_assignment=sink_assignment,
         memory_input_steps=memory_input_steps,
         seed=args.seed,
         device=device,
@@ -97,6 +100,7 @@ def main() -> None:
         "coordinate_fields": coordinate_fields,
         "pair_count": pair_count,
         "min_pair_spacing": min_pair_spacing,
+        "sink_assignment": sink_assignment,
         "memory_input_steps": memory_input_steps,
         "field_weight": field_weight,
         "localization_weight": localization_weight,

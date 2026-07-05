@@ -25,6 +25,7 @@ class TrainCurriculumTests(unittest.TestCase):
             damage_prob=0.12,
             coordinate_fields=True,
             min_pair_spacing=2,
+            sink_assignment="reverse",
             memory_input_steps=4,
         )
 
@@ -39,6 +40,7 @@ class TrainCurriculumTests(unittest.TestCase):
         self.assertEqual(late["pair_count"], 3)
         self.assertEqual(late["damage_prob"], 0.12)
         self.assertEqual(late["min_pair_spacing"], 2)
+        self.assertEqual(late["sink_assignment"], "reverse")
 
     def test_multi_pair_curriculum_rejects_other_tasks(self) -> None:
         args = argparse.Namespace(
@@ -49,6 +51,7 @@ class TrainCurriculumTests(unittest.TestCase):
             damage_prob=0.1,
             coordinate_fields=True,
             min_pair_spacing=1,
+            sink_assignment="aligned",
             memory_input_steps=4,
         )
 
@@ -69,7 +72,7 @@ class TrainCurriculumTests(unittest.TestCase):
             torch.save(
                 {
                     "model_state_dict": source.state_dict(),
-                    "layout": {"hidden_channels": 4},
+                    "layout": {"hidden_channels": 4, "route_channels": 0},
                     "args": {"cell_hidden": 16},
                 },
                 path,
@@ -79,6 +82,7 @@ class TrainCurriculumTests(unittest.TestCase):
                 init_model=str(path),
                 device=torch.device("cpu"),
                 expected_hidden_channels=4,
+                expected_route_channels=0,
                 expected_cell_hidden=16,
             )
 

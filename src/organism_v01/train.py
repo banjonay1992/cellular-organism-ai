@@ -10,7 +10,7 @@ from organism_v01.channels import ChannelLayout
 from organism_v01.evaluation import choose_device, evaluate_model, save_json_report, set_seed
 from organism_v01.metrics import classification_accuracy, compute_loss, mean_sink_margin, target_set_accuracy
 from organism_v01.organism import CellularOrganism
-from organism_v01.tasks import TASK_NAMES, generate_task_batch
+from organism_v01.tasks import SINK_ASSIGNMENTS, TASK_NAMES, generate_task_batch
 
 CURRICULA = ("none", "multi_pair")
 
@@ -22,6 +22,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--grid-size", type=int, default=16)
     parser.add_argument("--rollout-steps", type=int, default=24)
     parser.add_argument("--hidden-channels", type=int, default=8)
+    parser.add_argument("--route-channels", type=int, default=0)
     parser.add_argument("--cell-hidden", type=int, default=32)
     parser.add_argument("--task", choices=TASK_NAMES, default="routing")
     parser.add_argument("--curriculum", choices=CURRICULA, default="none")
@@ -29,6 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--coordinate-fields", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--pair-count", type=int, default=3)
     parser.add_argument("--min-pair-spacing", type=int, default=1)
+    parser.add_argument("--sink-assignment", choices=SINK_ASSIGNMENTS, default="aligned")
     parser.add_argument("--memory-input-steps", type=int, default=4)
     parser.add_argument("--field-weight", type=float, default=0.5)
     parser.add_argument("--localization-weight", type=float, default=1.0)
@@ -77,6 +79,7 @@ def curriculum_batch_params(args: argparse.Namespace, step: int) -> dict[str, fl
         "coordinate_fields": args.coordinate_fields,
         "pair_count": pair_count,
         "min_pair_spacing": args.min_pair_spacing,
+        "sink_assignment": args.sink_assignment,
         "memory_input_steps": args.memory_input_steps,
     }
 
@@ -89,7 +92,10 @@ def checkpoint_payload(
 ) -> dict[str, Any]:
     return {
         "model_state_dict": model.state_dict(),
-        "layout": {"hidden_channels": layout.hidden_channels},
+        "layout": {
+            "hidden_channels": layout.hidden_channels,
+            "route_channels": layout.route_channels,
+        },
         "args": vars(args),
         "metrics": metrics,
     }
@@ -101,6 +107,7 @@ def load_initial_model(
     init_model: str | None,
     device: torch.device,
     expected_hidden_channels: int,
+    expected_route_channels: int,
     expected_cell_hidden: int,
 ) -> None:
     if init_model is None:
@@ -108,6 +115,7 @@ def load_initial_model(
 
     checkpoint = torch.load(Path(init_model), map_location=device, weights_only=False)
     checkpoint_hidden_channels = int(checkpoint.get("layout", {}).get("hidden_channels", expected_hidden_channels))
+    checkpoint_route_channels = int(checkpoint.get("layout", {}).get("route_channels", 0))
     checkpoint_cell_hidden = int(checkpoint.get("args", {}).get("cell_hidden", expected_cell_hidden))
     if checkpoint_hidden_channels != expected_hidden_channels:
         raise ValueError(
@@ -118,6 +126,11 @@ def load_initial_model(
         raise ValueError(
             f"init checkpoint cell_hidden={checkpoint_cell_hidden} "
             f"does not match requested {expected_cell_hidden}"
+        )
+    if checkpoint_route_channels != expected_route_channels:
+        raise ValueError(
+            f"init checkpoint route_channels={checkpoint_route_channels} "
+            f"does not match requested {expected_route_channels}"
         )
     model.load_state_dict(checkpoint["model_state_dict"])
 
@@ -130,13 +143,14 @@ def main() -> None:
     device = choose_device(args.device)
     set_seed(args.seed)
 
-    layout = ChannelLayout(hidden_channels=args.hidden_channels)
+    layout = ChannelLayout(hidden_channels=args.hidden_channels, route_channels=args.route_channels)
     model = CellularOrganism(layout=layout, cell_hidden=args.cell_hidden).to(device)
     load_initial_model(
         model,
         init_model=args.init_model,
         device=device,
         expected_hidden_channels=args.hidden_channels,
+        expected_route_channels=args.route_channels,
         expected_cell_hidden=args.cell_hidden,
     )
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
@@ -153,6 +167,7 @@ def main() -> None:
         coordinate_fields=args.coordinate_fields,
         pair_count=args.pair_count,
         min_pair_spacing=args.min_pair_spacing,
+        sink_assignment=args.sink_assignment,
         memory_input_steps=args.memory_input_steps,
         seed=args.seed + 10_000,
         device=device,
@@ -175,6 +190,7 @@ def main() -> None:
             coordinate_fields=bool(batch_params["coordinate_fields"]),
             pair_count=int(batch_params["pair_count"]),
             min_pair_spacing=int(batch_params["min_pair_spacing"]),
+            sink_assignment=str(batch_params["sink_assignment"]),
             memory_input_steps=int(batch_params["memory_input_steps"]),
             seed=args.seed + 100_000 + step,
             device=device,
@@ -228,6 +244,7 @@ def main() -> None:
         coordinate_fields=args.coordinate_fields,
         pair_count=args.pair_count,
         min_pair_spacing=args.min_pair_spacing,
+        sink_assignment=args.sink_assignment,
         memory_input_steps=args.memory_input_steps,
         seed=args.seed + 20_000,
         device=device,
@@ -246,6 +263,7 @@ def main() -> None:
             "grid_size": args.grid_size,
             "rollout_steps": args.rollout_steps,
             "hidden_channels": args.hidden_channels,
+            "route_channels": args.route_channels,
             "cell_hidden": args.cell_hidden,
             "task": args.task,
             "curriculum": args.curriculum,
@@ -253,6 +271,7 @@ def main() -> None:
             "coordinate_fields": args.coordinate_fields,
             "pair_count": args.pair_count,
             "min_pair_spacing": args.min_pair_spacing,
+            "sink_assignment": args.sink_assignment,
             "memory_input_steps": args.memory_input_steps,
             "field_weight": args.field_weight,
             "localization_weight": args.localization_weight,
