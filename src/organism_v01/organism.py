@@ -9,6 +9,7 @@ from organism_v01.cell import (
     UPDATE_RULES,
     CellUpdate,
     GatedMessageCellUpdate,
+    MatchingReadoutCellUpdate,
     RankBindingCellUpdate,
     SelfTaggingCellUpdate,
     SinkStabilizedRankCellUpdate,
@@ -89,7 +90,7 @@ class CellularOrganism(nn.Module):
                 sink=layout.sink,
                 hidden=cell_hidden,
             )
-        else:
+        elif update_rule == "sink_stabilized_rank":
             self.cell_update = SinkStabilizedRankCellUpdate(
                 layout.total_channels,
                 hidden_start=layout.hidden_start,
@@ -97,6 +98,17 @@ class CellularOrganism(nn.Module):
                 source_a=layout.source_a,
                 source_b=layout.source_b,
                 sink=layout.sink,
+                hidden=cell_hidden,
+            )
+        else:
+            self.cell_update = MatchingReadoutCellUpdate(
+                layout.total_channels,
+                hidden_start=layout.hidden_start,
+                hidden_channels=layout.hidden_channels,
+                source_a=layout.source_a,
+                source_b=layout.source_b,
+                sink=layout.sink,
+                output_start=layout.output_start,
                 hidden=cell_hidden,
             )
 

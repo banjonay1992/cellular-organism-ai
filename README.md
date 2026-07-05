@@ -143,6 +143,8 @@ These are run artifacts, not hardcoded scores:
 - Multi-pair v0.6 self-tagging benchmark: arbitrary random unmarked permutations are intentionally not used because they are not determined by the input. Instead v0.6 adds a deterministic cyclic assignment stress probe and a `self_tagging` update rule with persistent internal tag slots. The old adjacent checkpoint reached reverse `0.51953125` and cycle `0.265625`. The first self-tagging checkpoint reached reverse `0.23697916666666666`, cycle `0.24609375`; after lower-rate continuation it reached reverse `0.2421875`, injury `0.27734375`, cycle `0.2109375`. Result: self-tagging as implemented does not solve uncued binding.
 - Multi-pair v0.7 rank-binding benchmark: added internal directional source/sink order waves, a binding curriculum, and hidden-vector diagnostics. The continued rank-binding checkpoint reached reverse `0.2734375`, injury `0.26171875`, cycle `0.2578125`, and 2-pair reverse stress `0.6041666666666666`. Result: rank waves improve 2-pair ordering but still fail stable 3-pair binding. Diagnostics showed strong rank-wave magnitude at sources but much weaker rank-wave magnitude at sinks, suggesting the order signal is not being stabilized across the body.
 - Multi-pair v0.8 sink-stabilized rank benchmark: added lateral source/sink order waves plus endpoint anchors, and reserved those rank channels so the learned update cannot overwrite them. The continued checkpoint reached reverse `0.302734375`, injury `0.33984375`, cycle `0.31640625`, and 2-pair reverse stress `0.5`. Diagnostics now show balanced rank magnitude at sources and sinks, so signal delivery improved; stable learned matching across all 3 pairs is still not solved.
+- Multi-pair v0.9 matching-readout benchmark: added a sink-local readout over source-label waves and an optional contrastive endpoint binding loss. The first matching-readout checkpoint reached reverse `0.26953125`, injury `0.296875`, cycle `0.265625`, and 2-pair reverse stress `0.5416666666666666`. A binding-loss continuation reached reverse `0.263671875`, injury `0.28515625`, cycle `0.27734375`, and 2-pair reverse stress `0.4270833333333333`. Result: the readout can exploit easier 2-pair structure, but endpoint embeddings stayed near random for 3-pair binding.
+- Assignment ambiguity audit: reverse and cycle assignments can present identical inputs with different targets. In `outputs/reports/assignment-ambiguity-reverse-cycle.json`, reverse vs cycle had identical inputs for `2048 / 2048` sampled items and conflicting targets for `1001 / 2048` items. That means one uncued model cannot be expected to satisfy both reverse and cycle rules simultaneously without an assignment/rule cue; the cycle check is useful as a contradiction probe, not as a fair all-in-one pass gate for uncued inputs.
 
 Example 3-pair damaged training path:
 
@@ -241,6 +243,17 @@ PYTHONPATH=src python3 -m organism_v01.benchmark_v06 \
   --model outputs/models/organism-v06-self-tagging.pt \
   --batches 12 \
   --report outputs/reports/benchmark-v06-self-tagging-continued.json
+```
+
+Audit whether two generated assignment rules are input-identical but target-conflicting:
+
+```bash
+PYTHONPATH=src python3 -m organism_v01.ambiguity \
+  --assignment-a reverse \
+  --assignment-b cycle \
+  --seeds 64 \
+  --batch-size 32 \
+  --report outputs/reports/assignment-ambiguity-reverse-cycle.json
 ```
 
 Train the first v0.6 self-tagging candidate:

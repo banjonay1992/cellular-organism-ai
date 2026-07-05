@@ -9,8 +9,14 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from organism_v01.channels import ChannelLayout
-from organism_v01.metrics import classification_accuracy, mean_sink_margin, target_peak_accuracy, target_set_accuracy
-from organism_v01.tasks import generate_routing_batch
+from organism_v01.metrics import (
+    binding_contrastive_loss,
+    classification_accuracy,
+    mean_sink_margin,
+    target_peak_accuracy,
+    target_set_accuracy,
+)
+from organism_v01.tasks import generate_multi_pair_batch, generate_routing_batch
 
 
 class MetricTests(unittest.TestCase):
@@ -62,6 +68,48 @@ class MetricTests(unittest.TestCase):
         first_row, first_col = [int(value) for value in batch.sink_rc[0]]
         final_state[0, layout.output_start + first_label, first_row, first_col] = -5.0
         self.assertLess(target_set_accuracy(final_state, batch, layout), 1.0)
+
+    def test_binding_contrastive_loss_rewards_paired_endpoint_codes(self) -> None:
+        layout = ChannelLayout(hidden_channels=6)
+        batch = generate_multi_pair_batch(
+            batch_size=2,
+            grid_size=12,
+            layout=layout,
+            pair_count=3,
+            sink_assignment="reverse",
+            seed=80,
+        )
+        final_state = torch.zeros_like(batch.initial)
+        basis = torch.eye(layout.hidden_channels)[:3] * 4.0
+        assert batch.pair_source_rc is not None
+        assert batch.pair_sink_rc is not None
+
+        for item in range(batch.initial.shape[0]):
+            for pair_index in range(3):
+                source_row, source_col = [int(value) for value in batch.pair_source_rc[item, pair_index]]
+                sink_row, sink_col = [int(value) for value in batch.pair_sink_rc[item, pair_index]]
+                final_state[item, layout.hidden_slice, source_row, source_col] = basis[pair_index]
+                final_state[item, layout.hidden_slice, sink_row, sink_col] = basis[pair_index]
+
+        matched_loss = binding_contrastive_loss(final_state, batch, layout, temperature=0.1)
+
+        swapped_state = final_state.clone()
+        for item in range(batch.initial.shape[0]):
+            sink_row, sink_col = [int(value) for value in batch.pair_sink_rc[item, 0]]
+            swapped_state[item, layout.hidden_slice, sink_row, sink_col] = basis[1]
+        swapped_loss = binding_contrastive_loss(swapped_state, batch, layout, temperature=0.1)
+
+        self.assertTrue(torch.isfinite(matched_loss))
+        self.assertLess(float(matched_loss), float(swapped_loss))
+
+    def test_binding_contrastive_loss_ignores_single_pair_batches(self) -> None:
+        layout = ChannelLayout(hidden_channels=4)
+        batch = generate_routing_batch(batch_size=2, grid_size=12, layout=layout, seed=81)
+        final_state = torch.zeros_like(batch.initial)
+
+        loss = binding_contrastive_loss(final_state, batch, layout)
+
+        self.assertEqual(float(loss), 0.0)
 
 
 if __name__ == "__main__":

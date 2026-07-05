@@ -105,7 +105,8 @@ def diagnose_binding(
         "hidden_paired_cosines": paired_cosines(hidden_source, hidden_sink),
         "hidden_cosine_matrix": mean_cosine_matrix(hidden_source, hidden_sink),
     }
-    rank_width = min(8, layout.hidden_channels)
+    diagnostic_width = 12 if model.update_rule == "matching_readout" else 8
+    rank_width = min(diagnostic_width, layout.hidden_channels)
     if rank_width:
         rank_slice = slice(layout.hidden_start, layout.hidden_start + rank_width)
         rank_source = gather_pair_vectors(rollout.final_state, batch.pair_source_rc, rank_slice)

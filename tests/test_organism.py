@@ -176,6 +176,39 @@ class OrganismTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(losses["total"]))
         self.assertGreater(grad_norm, 0.0)
 
+    def test_matching_readout_anchors_label_signal_at_sink_and_backpropagates(self) -> None:
+        torch.manual_seed(18)
+        layout = ChannelLayout(hidden_channels=14)
+        batch = generate_routing_batch(batch_size=3, grid_size=10, layout=layout, seed=18)
+        model = CellularOrganism(
+            layout=layout,
+            cell_hidden=16,
+            update_rule="matching_readout",
+        )
+
+        rollout = model(batch, steps=12)
+        losses = compute_loss(
+            rollout.final_state,
+            batch,
+            layout,
+            activity_loss=rollout.activity_loss,
+        )
+        losses["total"].backward()
+        grad_norm = sum(
+            float(parameter.grad.abs().sum())
+            for parameter in model.parameters()
+            if parameter.grad is not None
+        )
+        label_wave_channels = slice(layout.hidden_start + 8, layout.hidden_start + 12)
+        label_wave_energy = (rollout.final_state[:, label_wave_channels] * batch.sink_mask).detach().abs().sum()
+        output_energy = (rollout.final_state[:, layout.output_slice] * batch.sink_mask).detach().abs().sum()
+
+        self.assertTrue(torch.allclose(rollout.final_state[:, : layout.env_count], batch.env))
+        self.assertGreater(float(label_wave_energy), 0.0)
+        self.assertGreater(float(output_energy), 0.0)
+        self.assertTrue(torch.isfinite(losses["total"]))
+        self.assertGreater(grad_norm, 0.0)
+
     def test_rollout_returns_frames_and_can_continue(self) -> None:
         torch.manual_seed(12)
         layout = ChannelLayout(hidden_channels=4)

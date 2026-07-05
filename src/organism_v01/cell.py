@@ -374,4 +374,156 @@ class SinkStabilizedRankCellUpdate(nn.Module):
         return delta
 
 
-UPDATE_RULES = ("standard", "gated_message", "self_tagging", "rank_binding", "sink_stabilized_rank")
+class MatchingReadoutCellUpdate(nn.Module):
+    """Sink-stabilized rank waves plus learned local source-label matching."""
+
+    def __init__(
+        self,
+        channels: int,
+        *,
+        hidden_start: int,
+        hidden_channels: int,
+        source_a: int,
+        source_b: int,
+        sink: int,
+        output_start: int,
+        hidden: int = 64,
+    ) -> None:
+        super().__init__()
+        if hidden_channels < 12:
+            raise ValueError("matching_readout requires at least 12 hidden channels")
+
+        self.source_a = source_a
+        self.source_b = source_b
+        self.sink = sink
+        self.output_start = output_start
+        self.match_start = hidden_start
+        self.source_down = hidden_start
+        self.source_up = hidden_start + 1
+        self.sink_down = hidden_start + 2
+        self.sink_up = hidden_start + 3
+        self.source_at_sink_down = hidden_start + 4
+        self.source_at_sink_up = hidden_start + 5
+        self.sink_at_source_down = hidden_start + 6
+        self.sink_at_source_up = hidden_start + 7
+        self.source_a_down = hidden_start + 8
+        self.source_a_up = hidden_start + 9
+        self.source_b_down = hidden_start + 10
+        self.source_b_up = hidden_start + 11
+
+        groups = _largest_group_count(hidden)
+        self.perception = nn.Sequential(
+            nn.Conv2d(channels, hidden, kernel_size=3, padding=1),
+            nn.GroupNorm(groups, hidden),
+            nn.SiLU(),
+            nn.Conv2d(hidden, hidden, kernel_size=1),
+            nn.SiLU(),
+        )
+        self.wave_gate = nn.Conv2d(hidden, 12, kernel_size=1)
+        self.match_read = nn.Conv2d(12, 16, kernel_size=1)
+        self.readout = nn.Sequential(
+            nn.Conv2d(hidden + 16, hidden, kernel_size=1),
+            nn.SiLU(),
+            nn.Conv2d(hidden, hidden, kernel_size=1),
+            nn.SiLU(),
+        )
+        self.delta = nn.Conv2d(hidden, channels, kernel_size=1)
+        self.update_gate = nn.Conv2d(hidden, channels, kernel_size=1)
+        self.local_match = nn.Sequential(
+            nn.Conv2d(12, 16, kernel_size=1),
+            nn.SiLU(),
+            nn.Conv2d(16, 2, kernel_size=1),
+        )
+
+        self.register_buffer("source_down_kernel", SinkStabilizedRankCellUpdate._make_kernel(vertical="down", horizontal="right"))
+        self.register_buffer("source_up_kernel", SinkStabilizedRankCellUpdate._make_kernel(vertical="up", horizontal="right"))
+        self.register_buffer("sink_down_kernel", SinkStabilizedRankCellUpdate._make_kernel(vertical="down", horizontal="left"))
+        self.register_buffer("sink_up_kernel", SinkStabilizedRankCellUpdate._make_kernel(vertical="up", horizontal="left"))
+        self.register_buffer("diffuse_kernel", SinkStabilizedRankCellUpdate._make_diffuse_kernel())
+
+        nn.init.normal_(self.delta.weight, mean=0.0, std=5e-3)
+        nn.init.zeros_(self.delta.bias)
+        nn.init.zeros_(self.update_gate.weight)
+        nn.init.zeros_(self.update_gate.bias)
+        final_match = self.local_match[-1]
+        if isinstance(final_match, nn.Conv2d):
+            nn.init.normal_(final_match.weight, mean=0.0, std=1e-3)
+            nn.init.zeros_(final_match.bias)
+
+    @staticmethod
+    def _propagate(wave: torch.Tensor, kernel: torch.Tensor, marker: torch.Tensor) -> torch.Tensor:
+        propagated = torch.nn.functional.conv2d(wave, kernel, padding=1)
+        return (marker + propagated * 0.96).clamp(-4.0, 4.0)
+
+    def _anchor_target(self, anchor: torch.Tensor, incoming: torch.Tensor, marker: torch.Tensor) -> torch.Tensor:
+        diffused_anchor = torch.nn.functional.conv2d(anchor, self.diffuse_kernel, padding=1) * 0.88
+        return torch.where(marker.bool(), incoming, diffused_anchor).clamp(-4.0, 4.0)
+
+    def forward(self, state: torch.Tensor) -> torch.Tensor:
+        source_a_marker = state[:, self.source_a : self.source_a + 1].clamp(0.0, 1.0)
+        source_b_marker = state[:, self.source_b : self.source_b + 1].clamp(0.0, 1.0)
+        source_marker = (source_a_marker + source_b_marker).clamp(0.0, 1.0)
+        sink_marker = state[:, self.sink : self.sink + 1].clamp(0.0, 1.0)
+        match_slice = slice(self.match_start, self.match_start + 12)
+        match_features = state[:, match_slice]
+
+        source_down_state = state[:, self.source_down : self.source_down + 1]
+        source_up_state = state[:, self.source_up : self.source_up + 1]
+        sink_down_state = state[:, self.sink_down : self.sink_down + 1]
+        sink_up_state = state[:, self.sink_up : self.sink_up + 1]
+        source_at_sink_down_state = state[:, self.source_at_sink_down : self.source_at_sink_down + 1]
+        source_at_sink_up_state = state[:, self.source_at_sink_up : self.source_at_sink_up + 1]
+        sink_at_source_down_state = state[:, self.sink_at_source_down : self.sink_at_source_down + 1]
+        sink_at_source_up_state = state[:, self.sink_at_source_up : self.sink_at_source_up + 1]
+        source_a_down_state = state[:, self.source_a_down : self.source_a_down + 1]
+        source_a_up_state = state[:, self.source_a_up : self.source_a_up + 1]
+        source_b_down_state = state[:, self.source_b_down : self.source_b_down + 1]
+        source_b_up_state = state[:, self.source_b_up : self.source_b_up + 1]
+
+        perceived = self.perception(state)
+        match_context = self.match_read(match_features)
+        readout = self.readout(torch.cat([perceived, match_context], dim=1))
+        delta = self.delta(readout) * torch.sigmoid(self.update_gate(readout))
+
+        source_down_target = self._propagate(source_down_state, self.source_down_kernel, source_marker)
+        source_up_target = self._propagate(source_up_state, self.source_up_kernel, source_marker)
+        sink_down_target = self._propagate(sink_down_state, self.sink_down_kernel, sink_marker)
+        sink_up_target = self._propagate(sink_up_state, self.sink_up_kernel, sink_marker)
+        source_a_down_target = self._propagate(source_a_down_state, self.source_down_kernel, source_a_marker)
+        source_a_up_target = self._propagate(source_a_up_state, self.source_up_kernel, source_a_marker)
+        source_b_down_target = self._propagate(source_b_down_state, self.source_down_kernel, source_b_marker)
+        source_b_up_target = self._propagate(source_b_up_state, self.source_up_kernel, source_b_marker)
+        wave_targets = torch.cat(
+            [
+                source_down_target,
+                source_up_target,
+                sink_down_target,
+                sink_up_target,
+                self._anchor_target(source_at_sink_down_state, source_down_target, sink_marker),
+                self._anchor_target(source_at_sink_up_state, source_up_target, sink_marker),
+                self._anchor_target(sink_at_source_down_state, sink_down_target, source_marker),
+                self._anchor_target(sink_at_source_up_state, sink_up_target, source_marker),
+                source_a_down_target,
+                source_a_up_target,
+                source_b_down_target,
+                source_b_up_target,
+            ],
+            dim=1,
+        )
+        wave_delta = (wave_targets - match_features) * torch.sigmoid(self.wave_gate(perceived)) * 0.40
+
+        local_output = self.local_match(wave_targets) * sink_marker
+        delta = delta.clone()
+        delta[:, match_slice] = wave_delta
+        delta[:, self.output_start : self.output_start + 2] = delta[:, self.output_start : self.output_start + 2] + local_output
+        return delta
+
+
+UPDATE_RULES = (
+    "standard",
+    "gated_message",
+    "self_tagging",
+    "rank_binding",
+    "sink_stabilized_rank",
+    "matching_readout",
+)

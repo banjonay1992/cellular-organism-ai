@@ -92,6 +92,50 @@ def output_localization(
     return float((sink_energy / total_energy).mean().item())
 
 
+def _gather_pair_vectors(
+    state: torch.Tensor,
+    pair_rc: torch.Tensor,
+    channel_slice: slice,
+) -> torch.Tensor:
+    vectors = []
+    for item in range(state.shape[0]):
+        item_vectors = []
+        for pair_index in range(pair_rc.shape[1]):
+            row, col = [int(value) for value in pair_rc[item, pair_index]]
+            item_vectors.append(state[item, channel_slice, row, col])
+        vectors.append(torch.stack(item_vectors))
+    return torch.stack(vectors)
+
+
+def binding_contrastive_loss(
+    final_state: torch.Tensor,
+    batch: RoutingBatch,
+    layout: ChannelLayout,
+    *,
+    temperature: float = 0.2,
+) -> torch.Tensor:
+    """Align internal source/sink endpoint codes for generated multi-pair tasks."""
+
+    if temperature <= 0.0:
+        raise ValueError("temperature must be positive")
+    if batch.pair_source_rc is None or batch.pair_sink_rc is None:
+        return final_state.sum() * 0.0
+
+    pair_count = batch.pair_source_rc.shape[1]
+    if pair_count < 2:
+        return final_state.sum() * 0.0
+
+    source_vectors = _gather_pair_vectors(final_state, batch.pair_source_rc, layout.hidden_slice)
+    sink_vectors = _gather_pair_vectors(final_state, batch.pair_sink_rc, layout.hidden_slice)
+    source_vectors = F.normalize(source_vectors, dim=-1)
+    sink_vectors = F.normalize(sink_vectors, dim=-1)
+    logits = torch.einsum("bpc,bqc->bpq", sink_vectors, source_vectors) / temperature
+    targets = torch.arange(pair_count, device=final_state.device).expand(final_state.shape[0], pair_count)
+    sink_to_source = F.cross_entropy(logits.reshape(-1, pair_count), targets.reshape(-1))
+    source_to_sink = F.cross_entropy(logits.transpose(1, 2).reshape(-1, pair_count), targets.reshape(-1))
+    return (sink_to_source + source_to_sink) * 0.5
+
+
 def compute_loss(
     final_state: torch.Tensor,
     batch: RoutingBatch,
