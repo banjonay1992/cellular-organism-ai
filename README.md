@@ -135,6 +135,43 @@ These are run artifacts, not hardcoded scores:
 - Maze v0.2: held-out `target_set_accuracy = 1.0`; 25% mid-run injury recovery stayed at `1.0`.
 - Memory v0.3 probe: held-out `target_set_accuracy = 1.0`; erasing the source dropped near chance.
 - Multi-pair v0.2: the harder 3-pair damaged setup did not learn in the first run; an easier 2-pair no-damage setup reached held-out `target_set_accuracy = 0.9890625`.
+- Multi-pair v0.3: warm-starting from the 2-pair checkpoint and fine-tuning on 3 spaced pairs with 10% static damage reached held-out `target_set_accuracy = 0.99296875`; 20% mid-run injury recovery reached `0.984375`.
+
+Example 3-pair damaged training path:
+
+```bash
+PYTHONPATH=src python3 -m organism_v01.train \
+  --task multi \
+  --steps 650 \
+  --batch-size 32 \
+  --grid-size 16 \
+  --rollout-steps 28 \
+  --damage-prob 0.10 \
+  --pair-count 3 \
+  --min-pair-spacing 2 \
+  --lr 0.0008 \
+  --init-model outputs/models/organism-v02-multi.pt \
+  --save-model outputs/models/organism-v03-multi3.pt \
+  --report outputs/reports/train-v03-multi3-stage1.json
+```
+
+Then continue at lower rate:
+
+```bash
+PYTHONPATH=src python3 -m organism_v01.train \
+  --task multi \
+  --steps 600 \
+  --batch-size 32 \
+  --grid-size 16 \
+  --rollout-steps 32 \
+  --damage-prob 0.10 \
+  --pair-count 3 \
+  --min-pair-spacing 2 \
+  --lr 0.00035 \
+  --init-model outputs/models/organism-v03-multi3.pt \
+  --save-model outputs/models/organism-v03-multi3.pt \
+  --report outputs/reports/train-v03-multi3.json
+```
 
 ## Architecture
 

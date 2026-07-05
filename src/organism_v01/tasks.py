@@ -54,6 +54,34 @@ def _randint(generator: torch.Generator, low: int, high: int) -> int:
     return int(torch.randint(low=low, high=high, size=(1,), generator=generator).item())
 
 
+def _sample_spaced_rows(
+    *,
+    height: int,
+    pair_count: int,
+    min_pair_spacing: int,
+    generator: torch.Generator,
+) -> torch.Tensor:
+    if min_pair_spacing < 1:
+        raise ValueError("min_pair_spacing must be at least 1")
+
+    candidates = torch.arange(1, height - 1)
+    for _ in range(512):
+        rows = candidates[torch.randperm(candidates.numel(), generator=generator)[:pair_count]]
+        rows, _ = rows.sort()
+        if pair_count == 1 or bool((rows[1:] - rows[:-1] >= min_pair_spacing).all()):
+            return rows
+
+    selected: list[int] = []
+    for row in torch.randperm(height - 2, generator=generator).tolist():
+        candidate = row + 1
+        if all(abs(candidate - existing) >= min_pair_spacing for existing in selected):
+            selected.append(candidate)
+        if len(selected) == pair_count:
+            return torch.tensor(sorted(selected), dtype=torch.long)
+
+    raise ValueError("grid_size is too small for pair_count and min_pair_spacing")
+
+
 def _validate_common(grid_size: int, damage_prob: float) -> None:
     if grid_size < 8:
         raise ValueError("grid_size must be at least 8")
@@ -223,6 +251,7 @@ def generate_multi_pair_batch(
     grid_size: int,
     layout: ChannelLayout,
     pair_count: int = 3,
+    min_pair_spacing: int = 1,
     damage_prob: float = 0.08,
     coordinate_fields: bool = True,
     seed: int | None = None,
@@ -231,8 +260,8 @@ def generate_multi_pair_batch(
     """Generate several independent row-aligned source/sink pairs per item."""
 
     _validate_common(grid_size, damage_prob)
-    if pair_count < 2:
-        raise ValueError("pair_count must be at least 2 for multi-pair tasks")
+    if pair_count < 1:
+        raise ValueError("pair_count must be at least 1 for multi-pair tasks")
     if pair_count > grid_size - 2:
         raise ValueError("pair_count cannot exceed the number of interior rows")
 
@@ -253,8 +282,12 @@ def generate_multi_pair_batch(
     protected = torch.zeros_like(blocked)
 
     for item in range(batch_size):
-        rows = torch.randperm(height - 2, generator=generator)[:pair_count] + 1
-        rows, _ = rows.sort()
+        rows = _sample_spaced_rows(
+            height=height,
+            pair_count=pair_count,
+            min_pair_spacing=min_pair_spacing,
+            generator=generator,
+        )
         for pair_index, row_tensor in enumerate(rows):
             row = int(row_tensor.item())
             label = _randint(generator, 0, 2)
@@ -353,6 +386,7 @@ def generate_task_batch(
     damage_prob: float,
     coordinate_fields: bool = True,
     pair_count: int = 3,
+    min_pair_spacing: int = 1,
     memory_input_steps: int = 4,
     seed: int | None = None,
     device: torch.device | str | None = None,
@@ -395,6 +429,7 @@ def generate_task_batch(
             grid_size=grid_size,
             layout=layout,
             pair_count=pair_count,
+            min_pair_spacing=min_pair_spacing,
             damage_prob=damage_prob,
             coordinate_fields=coordinate_fields,
             seed=seed,

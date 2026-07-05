@@ -94,6 +94,35 @@ class RoutingTaskTests(unittest.TestCase):
         self.assertEqual(float(batch.sink_mask.sum()), 15.0)
         self.assertEqual(float(batch.target.sum()), 15.0)
 
+    def test_multi_pair_spacing_keeps_rows_apart(self) -> None:
+        layout = ChannelLayout(hidden_channels=4)
+        batch = generate_multi_pair_batch(
+            batch_size=12,
+            grid_size=16,
+            layout=layout,
+            pair_count=3,
+            min_pair_spacing=3,
+            seed=809,
+        )
+
+        self.assertIsNotNone(batch.pair_sink_rc)
+        rows = batch.pair_sink_rc[:, :, 0]
+        gaps = rows[:, 1:] - rows[:, :-1]
+        self.assertTrue((gaps >= 3).all())
+
+    def test_multi_pair_can_generate_single_pair_for_curriculum(self) -> None:
+        layout = ChannelLayout(hidden_channels=4)
+        batch = generate_multi_pair_batch(
+            batch_size=5,
+            grid_size=12,
+            layout=layout,
+            pair_count=1,
+            seed=810,
+        )
+
+        self.assertEqual(float(batch.sink_mask.sum()), 5.0)
+        self.assertEqual(float(batch.target.sum()), 5.0)
+
     def test_memory_task_hides_source_after_input_phase(self) -> None:
         layout = ChannelLayout(hidden_channels=4)
         batch = generate_memory_batch(

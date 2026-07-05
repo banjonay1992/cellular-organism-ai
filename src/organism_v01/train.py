@@ -12,6 +12,8 @@ from organism_v01.metrics import classification_accuracy, compute_loss, mean_sin
 from organism_v01.organism import CellularOrganism
 from organism_v01.tasks import TASK_NAMES, generate_task_batch
 
+CURRICULA = ("none", "multi_pair")
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train organism v0.1 on generated routing tasks.")
@@ -22,9 +24,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hidden-channels", type=int, default=8)
     parser.add_argument("--cell-hidden", type=int, default=32)
     parser.add_argument("--task", choices=TASK_NAMES, default="routing")
+    parser.add_argument("--curriculum", choices=CURRICULA, default="none")
     parser.add_argument("--damage-prob", type=float, default=0.12)
     parser.add_argument("--coordinate-fields", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--pair-count", type=int, default=3)
+    parser.add_argument("--min-pair-spacing", type=int, default=1)
     parser.add_argument("--memory-input-steps", type=int, default=4)
     parser.add_argument("--field-weight", type=float, default=0.5)
     parser.add_argument("--localization-weight", type=float, default=1.0)
@@ -35,9 +39,46 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eval-batches", type=int, default=12)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--log-every", type=int, default=25)
+    parser.add_argument("--init-model", default=None)
     parser.add_argument("--save-model", default="outputs/models/organism-v01.pt")
     parser.add_argument("--report", default="outputs/reports/train-v01.json")
     return parser
+
+
+def curriculum_batch_params(args: argparse.Namespace, step: int) -> dict[str, float | int | str | bool]:
+    pair_count = args.pair_count
+    damage_prob = args.damage_prob
+    task = args.task
+
+    if args.curriculum == "multi_pair":
+        if args.task != "multi":
+            raise ValueError("--curriculum multi_pair requires --task multi")
+        progress = step / max(args.steps, 1)
+        task = "multi"
+        if progress < 0.20:
+            pair_count = 1
+            damage_prob = 0.0
+        elif progress < 0.45:
+            pair_count = min(2, args.pair_count)
+            damage_prob = 0.0
+        elif progress < 0.70:
+            pair_count = args.pair_count
+            damage_prob = 0.0
+        elif progress < 0.85:
+            pair_count = args.pair_count
+            damage_prob = args.damage_prob * 0.5
+        else:
+            pair_count = args.pair_count
+            damage_prob = args.damage_prob
+
+    return {
+        "task": task,
+        "damage_prob": damage_prob,
+        "coordinate_fields": args.coordinate_fields,
+        "pair_count": pair_count,
+        "min_pair_spacing": args.min_pair_spacing,
+        "memory_input_steps": args.memory_input_steps,
+    }
 
 
 def checkpoint_payload(
@@ -54,6 +95,33 @@ def checkpoint_payload(
     }
 
 
+def load_initial_model(
+    model: CellularOrganism,
+    *,
+    init_model: str | None,
+    device: torch.device,
+    expected_hidden_channels: int,
+    expected_cell_hidden: int,
+) -> None:
+    if init_model is None:
+        return
+
+    checkpoint = torch.load(Path(init_model), map_location=device, weights_only=False)
+    checkpoint_hidden_channels = int(checkpoint.get("layout", {}).get("hidden_channels", expected_hidden_channels))
+    checkpoint_cell_hidden = int(checkpoint.get("args", {}).get("cell_hidden", expected_cell_hidden))
+    if checkpoint_hidden_channels != expected_hidden_channels:
+        raise ValueError(
+            f"init checkpoint hidden_channels={checkpoint_hidden_channels} "
+            f"does not match requested {expected_hidden_channels}"
+        )
+    if checkpoint_cell_hidden != expected_cell_hidden:
+        raise ValueError(
+            f"init checkpoint cell_hidden={checkpoint_cell_hidden} "
+            f"does not match requested {expected_cell_hidden}"
+        )
+    model.load_state_dict(checkpoint["model_state_dict"])
+
+
 def main() -> None:
     args = build_parser().parse_args()
     if args.steps <= 0:
@@ -64,6 +132,13 @@ def main() -> None:
 
     layout = ChannelLayout(hidden_channels=args.hidden_channels)
     model = CellularOrganism(layout=layout, cell_hidden=args.cell_hidden).to(device)
+    load_initial_model(
+        model,
+        init_model=args.init_model,
+        device=device,
+        expected_hidden_channels=args.hidden_channels,
+        expected_cell_hidden=args.cell_hidden,
+    )
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
     baseline_metrics = evaluate_model(
@@ -77,6 +152,7 @@ def main() -> None:
         task=args.task,
         coordinate_fields=args.coordinate_fields,
         pair_count=args.pair_count,
+        min_pair_spacing=args.min_pair_spacing,
         memory_input_steps=args.memory_input_steps,
         seed=args.seed + 10_000,
         device=device,
@@ -89,15 +165,17 @@ def main() -> None:
     history: list[dict[str, float | int]] = []
     for step in range(1, args.steps + 1):
         model.train()
+        batch_params = curriculum_batch_params(args, step)
         batch = generate_task_batch(
-            task=args.task,
+            task=str(batch_params["task"]),
             batch_size=args.batch_size,
             grid_size=args.grid_size,
             layout=layout,
-            damage_prob=args.damage_prob,
-            coordinate_fields=args.coordinate_fields,
-            pair_count=args.pair_count,
-            memory_input_steps=args.memory_input_steps,
+            damage_prob=float(batch_params["damage_prob"]),
+            coordinate_fields=bool(batch_params["coordinate_fields"]),
+            pair_count=int(batch_params["pair_count"]),
+            min_pair_spacing=int(batch_params["min_pair_spacing"]),
+            memory_input_steps=int(batch_params["memory_input_steps"]),
             seed=args.seed + 100_000 + step,
             device=device,
         )
@@ -124,6 +202,8 @@ def main() -> None:
             margin = mean_sink_margin(rollout.final_state.detach(), batch, layout)
             row = {
                 "step": step,
+                "train_pair_count": int(batch_params["pair_count"]),
+                "train_damage_prob": float(batch_params["damage_prob"]),
                 "loss": float(losses["total"].item()),
                 "task_loss": float(losses["task"].item()),
                 "sink_loss": float(losses["sink"].item()),
@@ -147,6 +227,7 @@ def main() -> None:
         task=args.task,
         coordinate_fields=args.coordinate_fields,
         pair_count=args.pair_count,
+        min_pair_spacing=args.min_pair_spacing,
         memory_input_steps=args.memory_input_steps,
         seed=args.seed + 20_000,
         device=device,
@@ -167,9 +248,11 @@ def main() -> None:
             "hidden_channels": args.hidden_channels,
             "cell_hidden": args.cell_hidden,
             "task": args.task,
+            "curriculum": args.curriculum,
             "damage_prob": args.damage_prob,
             "coordinate_fields": args.coordinate_fields,
             "pair_count": args.pair_count,
+            "min_pair_spacing": args.min_pair_spacing,
             "memory_input_steps": args.memory_input_steps,
             "field_weight": args.field_weight,
             "localization_weight": args.localization_weight,
@@ -178,6 +261,7 @@ def main() -> None:
             "lr": args.lr,
             "seed": args.seed,
             "eval_batches": args.eval_batches,
+            "init_model": args.init_model,
         },
         "baseline_untrained": baseline_metrics,
         "trained": trained_metrics,

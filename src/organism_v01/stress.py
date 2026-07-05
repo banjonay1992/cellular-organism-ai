@@ -23,6 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--damage-prob", type=float, default=None)
     parser.add_argument("--coordinate-fields", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--pair-count", type=int, default=None)
+    parser.add_argument("--min-pair-spacing", type=int, default=None)
     parser.add_argument("--memory-input-steps", type=int, default=None)
     parser.add_argument("--seed", type=int, default=9900)
     parser.add_argument("--device", default="auto")
@@ -55,6 +56,7 @@ def main() -> None:
     damage_prob = args.damage_prob if args.damage_prob is not None else float(checkpoint_args.get("damage_prob", 0.12))
     coordinate_fields = args.coordinate_fields if args.coordinate_fields is not None else bool(checkpoint_args.get("coordinate_fields", True))
     pair_count = args.pair_count if args.pair_count is not None else int(checkpoint_args.get("pair_count", 3))
+    min_pair_spacing = args.min_pair_spacing if args.min_pair_spacing is not None else int(checkpoint_args.get("min_pair_spacing", 1))
     memory_input_steps = args.memory_input_steps if args.memory_input_steps is not None else int(checkpoint_args.get("memory_input_steps", 4))
     field_weight = float(checkpoint_args.get("field_weight", 0.5))
     localization_weight = float(checkpoint_args.get("localization_weight", 1.0))
@@ -113,6 +115,7 @@ def main() -> None:
             task=str(scenario["task"]),
             coordinate_fields=bool(scenario["coordinate_fields"]),
             pair_count=pair_count,
+            min_pair_spacing=min_pair_spacing,
             memory_input_steps=memory_input_steps,
             seed=args.seed + offset * 10_000,
             device=device,
@@ -130,6 +133,7 @@ def main() -> None:
         "rollout_steps": rollout_steps,
         "base_task": task,
         "pair_count": pair_count,
+        "min_pair_spacing": min_pair_spacing,
         "memory_input_steps": memory_input_steps,
         "scenarios": results,
     }
@@ -139,4 +143,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
