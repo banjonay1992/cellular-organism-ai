@@ -142,4 +142,101 @@ class SelfTaggingCellUpdate(nn.Module):
         return delta
 
 
-UPDATE_RULES = ("standard", "gated_message", "self_tagging")
+class RankBindingCellUpdate(nn.Module):
+    """Shared update with internal directional order waves for source/sink ranks."""
+
+    def __init__(
+        self,
+        channels: int,
+        *,
+        hidden_start: int,
+        hidden_channels: int,
+        source_a: int,
+        source_b: int,
+        sink: int,
+        hidden: int = 64,
+    ) -> None:
+        super().__init__()
+        if hidden_channels < 4:
+            raise ValueError("rank_binding requires at least 4 hidden channels")
+
+        self.hidden_start = hidden_start
+        self.source_a = source_a
+        self.source_b = source_b
+        self.sink = sink
+        self.source_down = hidden_start
+        self.source_up = hidden_start + 1
+        self.sink_down = hidden_start + 2
+        self.sink_up = hidden_start + 3
+
+        groups = _largest_group_count(hidden)
+        self.perception = nn.Sequential(
+            nn.Conv2d(channels, hidden, kernel_size=3, padding=1),
+            nn.GroupNorm(groups, hidden),
+            nn.SiLU(),
+            nn.Conv2d(hidden, hidden, kernel_size=1),
+            nn.SiLU(),
+        )
+        self.wave_gate = nn.Conv2d(hidden, 4, kernel_size=1)
+        self.rank_read = nn.Conv2d(4, 8, kernel_size=1)
+        self.readout = nn.Sequential(
+            nn.Conv2d(hidden + 8, hidden, kernel_size=1),
+            nn.SiLU(),
+            nn.Conv2d(hidden, hidden, kernel_size=1),
+            nn.SiLU(),
+        )
+        self.delta = nn.Conv2d(hidden, channels, kernel_size=1)
+        self.update_gate = nn.Conv2d(hidden, channels, kernel_size=1)
+
+        down_kernel = torch.zeros(1, 1, 3, 3)
+        down_kernel[0, 0, 0, 1] = 1.0
+        up_kernel = torch.zeros(1, 1, 3, 3)
+        up_kernel[0, 0, 2, 1] = 1.0
+        self.register_buffer("down_kernel", down_kernel)
+        self.register_buffer("up_kernel", up_kernel)
+
+        nn.init.normal_(self.delta.weight, mean=0.0, std=5e-3)
+        nn.init.zeros_(self.delta.bias)
+        nn.init.zeros_(self.update_gate.weight)
+        nn.init.zeros_(self.update_gate.bias)
+
+    def _directional_target(self, marker: torch.Tensor, wave: torch.Tensor, *, downward: bool) -> torch.Tensor:
+        kernel = self.down_kernel if downward else self.up_kernel
+        propagated = torch.nn.functional.conv2d(wave, kernel, padding=1)
+        return (marker + propagated * 0.94).clamp(-3.0, 3.0)
+
+    def forward(self, state: torch.Tensor) -> torch.Tensor:
+        source_marker = (state[:, self.source_a : self.source_a + 1] + state[:, self.source_b : self.source_b + 1]).clamp(0.0, 1.0)
+        sink_marker = state[:, self.sink : self.sink + 1].clamp(0.0, 1.0)
+        source_down_state = state[:, self.source_down : self.source_down + 1]
+        source_up_state = state[:, self.source_up : self.source_up + 1]
+        sink_down_state = state[:, self.sink_down : self.sink_down + 1]
+        sink_up_state = state[:, self.sink_up : self.sink_up + 1]
+
+        perceived = self.perception(state)
+        rank_features = torch.cat(
+            [source_down_state, source_up_state, sink_down_state, sink_up_state],
+            dim=1,
+        )
+        rank_context = self.rank_read(rank_features)
+        readout = self.readout(torch.cat([perceived, rank_context], dim=1))
+        delta = self.delta(readout) * torch.sigmoid(self.update_gate(readout))
+
+        wave_targets = torch.cat(
+            [
+                self._directional_target(source_marker, source_down_state, downward=True),
+                self._directional_target(source_marker, source_up_state, downward=False),
+                self._directional_target(sink_marker, sink_down_state, downward=True),
+                self._directional_target(sink_marker, sink_up_state, downward=False),
+            ],
+            dim=1,
+        )
+        wave_states = rank_features
+        wave_delta = (wave_targets - wave_states) * torch.sigmoid(self.wave_gate(perceived)) * 0.35
+
+        delta = delta.clone()
+        delta[:, self.source_down : self.sink_up + 1] = delta[:, self.source_down : self.sink_up + 1] + wave_delta
+        return delta
+
+
+UPDATE_RULES = ("standard", "gated_message", "self_tagging", "rank_binding")

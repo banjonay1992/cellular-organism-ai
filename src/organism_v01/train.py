@@ -13,7 +13,7 @@ from organism_v01.metrics import classification_accuracy, compute_loss, mean_sin
 from organism_v01.organism import CellularOrganism
 from organism_v01.tasks import SINK_ASSIGNMENTS, TASK_NAMES, generate_task_batch
 
-CURRICULA = ("none", "multi_pair")
+CURRICULA = ("none", "multi_pair", "binding")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -56,26 +56,54 @@ def curriculum_batch_params(args: argparse.Namespace, step: int) -> dict[str, fl
     damage_prob = args.damage_prob
     task = args.task
 
-    if args.curriculum == "multi_pair":
+    sink_assignment = args.sink_assignment
+
+    if args.curriculum in {"multi_pair", "binding"}:
         if args.task != "multi":
-            raise ValueError("--curriculum multi_pair requires --task multi")
+            raise ValueError(f"--curriculum {args.curriculum} requires --task multi")
         progress = step / max(args.steps, 1)
         task = "multi"
-        if progress < 0.20:
-            pair_count = 1
-            damage_prob = 0.0
-        elif progress < 0.45:
-            pair_count = min(2, args.pair_count)
-            damage_prob = 0.0
-        elif progress < 0.70:
-            pair_count = args.pair_count
-            damage_prob = 0.0
-        elif progress < 0.85:
-            pair_count = args.pair_count
-            damage_prob = args.damage_prob * 0.5
+        if args.curriculum == "multi_pair":
+            if progress < 0.20:
+                pair_count = 1
+                damage_prob = 0.0
+            elif progress < 0.45:
+                pair_count = min(2, args.pair_count)
+                damage_prob = 0.0
+            elif progress < 0.70:
+                pair_count = args.pair_count
+                damage_prob = 0.0
+            elif progress < 0.85:
+                pair_count = args.pair_count
+                damage_prob = args.damage_prob * 0.5
+            else:
+                pair_count = args.pair_count
+                damage_prob = args.damage_prob
         else:
-            pair_count = args.pair_count
-            damage_prob = args.damage_prob
+            if progress < 0.15:
+                pair_count = 1
+                sink_assignment = "aligned"
+                damage_prob = 0.0
+            elif progress < 0.30:
+                pair_count = min(2, args.pair_count)
+                sink_assignment = "aligned"
+                damage_prob = 0.0
+            elif progress < 0.50:
+                pair_count = min(2, args.pair_count)
+                sink_assignment = "reverse"
+                damage_prob = 0.0
+            elif progress < 0.70:
+                pair_count = args.pair_count
+                sink_assignment = "reverse"
+                damage_prob = 0.0
+            elif progress < 0.85:
+                pair_count = args.pair_count
+                sink_assignment = "cycle"
+                damage_prob = 0.0
+            else:
+                pair_count = args.pair_count
+                sink_assignment = args.sink_assignment
+                damage_prob = args.damage_prob
 
     return {
         "task": task,
@@ -83,7 +111,7 @@ def curriculum_batch_params(args: argparse.Namespace, step: int) -> dict[str, fl
         "coordinate_fields": args.coordinate_fields,
         "pair_count": pair_count,
         "min_pair_spacing": args.min_pair_spacing,
-        "sink_assignment": args.sink_assignment,
+        "sink_assignment": sink_assignment,
         "memory_input_steps": args.memory_input_steps,
     }
 
@@ -211,7 +239,7 @@ def main() -> None:
         activity_weight=args.activity_weight,
     )
 
-    history: list[dict[str, float | int]] = []
+    history: list[dict[str, float | int | str]] = []
     for step in range(1, args.steps + 1):
         model.train()
         batch_params = curriculum_batch_params(args, step)
@@ -254,6 +282,7 @@ def main() -> None:
                 "step": step,
                 "train_pair_count": int(batch_params["pair_count"]),
                 "train_damage_prob": float(batch_params["damage_prob"]),
+                "train_sink_assignment": str(batch_params["sink_assignment"]),
                 "loss": float(losses["total"].item()),
                 "task_loss": float(losses["task"].item()),
                 "sink_loss": float(losses["sink"].item()),

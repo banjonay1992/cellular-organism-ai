@@ -58,6 +58,34 @@ class TrainCurriculumTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             curriculum_batch_params(args, 1)
 
+    def test_binding_curriculum_phases_rank_assignments(self) -> None:
+        args = argparse.Namespace(
+            task="multi",
+            curriculum="binding",
+            steps=100,
+            pair_count=3,
+            damage_prob=0.12,
+            coordinate_fields=True,
+            min_pair_spacing=1,
+            sink_assignment="reverse",
+            memory_input_steps=4,
+        )
+
+        one_pair = curriculum_batch_params(args, 1)
+        two_aligned = curriculum_batch_params(args, 20)
+        two_reverse = curriculum_batch_params(args, 40)
+        three_reverse = curriculum_batch_params(args, 60)
+        three_cycle = curriculum_batch_params(args, 80)
+        final = curriculum_batch_params(args, 95)
+
+        self.assertEqual((one_pair["pair_count"], one_pair["sink_assignment"]), (1, "aligned"))
+        self.assertEqual((two_aligned["pair_count"], two_aligned["sink_assignment"]), (2, "aligned"))
+        self.assertEqual((two_reverse["pair_count"], two_reverse["sink_assignment"]), (2, "reverse"))
+        self.assertEqual((three_reverse["pair_count"], three_reverse["sink_assignment"]), (3, "reverse"))
+        self.assertEqual((three_cycle["pair_count"], three_cycle["sink_assignment"]), (3, "cycle"))
+        self.assertEqual((final["pair_count"], final["sink_assignment"]), (3, "reverse"))
+        self.assertEqual(final["damage_prob"], 0.12)
+
     def test_load_initial_model_restores_weights(self) -> None:
         layout = ChannelLayout(hidden_channels=4)
         source = CellularOrganism(layout=layout, cell_hidden=16)
