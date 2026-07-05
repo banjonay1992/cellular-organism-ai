@@ -14,6 +14,7 @@ from organism_v01.metrics import (
     classification_accuracy,
     compute_loss,
     mean_sink_margin,
+    rank_slot_supervision_loss,
     target_set_accuracy,
 )
 from organism_v01.organism import CellularOrganism
@@ -49,6 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--activity-weight", type=float, default=1e-3)
     parser.add_argument("--binding-weight", type=float, default=0.0)
     parser.add_argument("--binding-temperature", type=float, default=0.2)
+    parser.add_argument("--slot-weight", type=float, default=0.0)
     parser.add_argument("--lr", type=float, default=2e-3)
     parser.add_argument("--seed", type=int, default=11)
     parser.add_argument("--eval-batches", type=int, default=12)
@@ -327,6 +329,15 @@ def main() -> None:
             )
             losses["binding"] = binding_loss
             losses["total"] = losses["total"] + binding_loss * args.binding_weight
+        if args.slot_weight:
+            losses = dict(losses)
+            slot_loss = rank_slot_supervision_loss(
+                rollout.final_state,
+                batch,
+                layout,
+            )
+            losses["slot"] = slot_loss
+            losses["total"] = losses["total"] + slot_loss * args.slot_weight
 
         optimizer.zero_grad(set_to_none=True)
         losses["total"].backward()
@@ -348,6 +359,7 @@ def main() -> None:
                 "quiet_loss": float(losses["quiet"].item()),
                 "localization_loss": float(losses["localization"].item()),
                 "binding_loss": float(losses.get("binding", losses["total"] * 0.0).item()),
+                "slot_loss": float(losses.get("slot", losses["total"] * 0.0).item()),
                 "accuracy": accuracy,
                 "target_set_accuracy": set_accuracy,
                 "sink_margin": margin,
@@ -406,6 +418,7 @@ def main() -> None:
             "activity_weight": args.activity_weight,
             "binding_weight": args.binding_weight,
             "binding_temperature": args.binding_temperature,
+            "slot_weight": args.slot_weight,
             "lr": args.lr,
             "seed": args.seed,
             "eval_batches": args.eval_batches,

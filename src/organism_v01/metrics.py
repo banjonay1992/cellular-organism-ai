@@ -136,6 +136,49 @@ def binding_contrastive_loss(
     return (sink_to_source + source_to_sink) * 0.5
 
 
+def rank_slot_supervision_loss(
+    final_state: torch.Tensor,
+    batch: RoutingBatch,
+    layout: ChannelLayout,
+    *,
+    slot_offset: int = 12,
+    slot_count: int = 3,
+) -> torch.Tensor:
+    """Teach sink cells the generated source-rank label slots.
+
+    The rank-slot update reserves two hidden channels per source rank. This
+    auxiliary loss is deliberately limited to full-rank multi-pair batches so it
+    does not invent labels for the one-pair and two-pair curriculum stages.
+    """
+
+    if batch.pair_labels is None or batch.pair_sink_rc is None:
+        return final_state.sum() * 0.0
+    if batch.pair_labels.shape[1] != slot_count:
+        return final_state.sum() * 0.0
+
+    slot_width = slot_count * layout.output_count
+    slot_start = layout.hidden_start + slot_offset
+    if layout.hidden_channels < slot_offset + slot_width:
+        return final_state.sum() * 0.0
+
+    slot_slice = slice(slot_start, slot_start + slot_width)
+    terms: list[torch.Tensor] = []
+    for item in range(final_state.shape[0]):
+        target = torch.zeros(slot_width, device=final_state.device, dtype=final_state.dtype)
+        for rank_index in range(slot_count):
+            label = int(batch.pair_labels[item, rank_index].item())
+            target[rank_index * layout.output_count + label] = 1.0
+
+        for sink_index in range(slot_count):
+            row, col = [int(value) for value in batch.pair_sink_rc[item, sink_index]]
+            logits = final_state[item, slot_slice, row, col]
+            terms.append(F.binary_cross_entropy_with_logits(logits, target))
+
+    if not terms:
+        return final_state.sum() * 0.0
+    return torch.stack(terms).mean()
+
+
 def compute_loss(
     final_state: torch.Tensor,
     batch: RoutingBatch,

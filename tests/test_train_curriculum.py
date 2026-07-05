@@ -12,10 +12,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from organism_v01.channels import ChannelLayout
 from organism_v01.organism import CellularOrganism
-from organism_v01.train import curriculum_batch_params, load_initial_model
+from organism_v01.train import build_parser, curriculum_batch_params, load_initial_model
 
 
 class TrainCurriculumTests(unittest.TestCase):
+    def test_parser_exposes_slot_weight_for_rank_slot_training(self) -> None:
+        args = build_parser().parse_args(["--slot-weight", "0.4"])
+
+        self.assertEqual(args.slot_weight, 0.4)
+
     def test_multi_pair_curriculum_ramps_to_final_task(self) -> None:
         args = argparse.Namespace(
             task="multi",

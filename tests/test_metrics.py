@@ -13,6 +13,7 @@ from organism_v01.metrics import (
     binding_contrastive_loss,
     classification_accuracy,
     mean_sink_margin,
+    rank_slot_supervision_loss,
     target_peak_accuracy,
     target_set_accuracy,
 )
@@ -108,6 +109,55 @@ class MetricTests(unittest.TestCase):
         final_state = torch.zeros_like(batch.initial)
 
         loss = binding_contrastive_loss(final_state, batch, layout)
+
+        self.assertEqual(float(loss), 0.0)
+
+    def test_rank_slot_supervision_loss_rewards_correct_sink_slots(self) -> None:
+        layout = ChannelLayout(hidden_channels=20, rule_channels=1)
+        batch = generate_multi_pair_batch(
+            batch_size=2,
+            grid_size=12,
+            layout=layout,
+            pair_count=3,
+            sink_assignment="reverse",
+            seed=82,
+        )
+        final_state = torch.zeros_like(batch.initial)
+        slot_slice = slice(layout.hidden_start + 12, layout.hidden_start + 18)
+        assert batch.pair_labels is not None
+        assert batch.pair_sink_rc is not None
+
+        for item in range(batch.initial.shape[0]):
+            target = torch.full((6,), -5.0)
+            for rank_index in range(3):
+                label = int(batch.pair_labels[item, rank_index])
+                target[rank_index * 2 + label] = 5.0
+            for sink_index in range(3):
+                row, col = [int(value) for value in batch.pair_sink_rc[item, sink_index]]
+                final_state[item, slot_slice, row, col] = target
+
+        matched_loss = rank_slot_supervision_loss(final_state, batch, layout)
+        wrong_state = final_state.clone()
+        first_row, first_col = [int(value) for value in batch.pair_sink_rc[0, 0]]
+        wrong_state[0, slot_slice, first_row, first_col] = -wrong_state[0, slot_slice, first_row, first_col]
+        wrong_loss = rank_slot_supervision_loss(wrong_state, batch, layout)
+
+        self.assertTrue(torch.isfinite(matched_loss))
+        self.assertLess(float(matched_loss), float(wrong_loss))
+
+    def test_rank_slot_supervision_loss_ignores_incomplete_pair_sets(self) -> None:
+        layout = ChannelLayout(hidden_channels=20, rule_channels=1)
+        batch = generate_multi_pair_batch(
+            batch_size=2,
+            grid_size=12,
+            layout=layout,
+            pair_count=2,
+            sink_assignment="reverse",
+            seed=83,
+        )
+        final_state = torch.zeros_like(batch.initial)
+
+        loss = rank_slot_supervision_loss(final_state, batch, layout)
 
         self.assertEqual(float(loss), 0.0)
 
