@@ -239,4 +239,139 @@ class RankBindingCellUpdate(nn.Module):
         return delta
 
 
-UPDATE_RULES = ("standard", "gated_message", "self_tagging", "rank_binding")
+class SinkStabilizedRankCellUpdate(nn.Module):
+    """Rank waves with bidirectional lateral spread and endpoint anchors."""
+
+    def __init__(
+        self,
+        channels: int,
+        *,
+        hidden_start: int,
+        hidden_channels: int,
+        source_a: int,
+        source_b: int,
+        sink: int,
+        hidden: int = 64,
+    ) -> None:
+        super().__init__()
+        if hidden_channels < 8:
+            raise ValueError("sink_stabilized_rank requires at least 8 hidden channels")
+
+        self.source_a = source_a
+        self.source_b = source_b
+        self.sink = sink
+        self.rank_start = hidden_start
+        self.source_down = hidden_start
+        self.source_up = hidden_start + 1
+        self.sink_down = hidden_start + 2
+        self.sink_up = hidden_start + 3
+        self.source_at_sink_down = hidden_start + 4
+        self.source_at_sink_up = hidden_start + 5
+        self.sink_at_source_down = hidden_start + 6
+        self.sink_at_source_up = hidden_start + 7
+
+        groups = _largest_group_count(hidden)
+        self.perception = nn.Sequential(
+            nn.Conv2d(channels, hidden, kernel_size=3, padding=1),
+            nn.GroupNorm(groups, hidden),
+            nn.SiLU(),
+            nn.Conv2d(hidden, hidden, kernel_size=1),
+            nn.SiLU(),
+        )
+        self.wave_gate = nn.Conv2d(hidden, 8, kernel_size=1)
+        self.rank_read = nn.Conv2d(8, 12, kernel_size=1)
+        self.readout = nn.Sequential(
+            nn.Conv2d(hidden + 12, hidden, kernel_size=1),
+            nn.SiLU(),
+            nn.Conv2d(hidden, hidden, kernel_size=1),
+            nn.SiLU(),
+        )
+        self.delta = nn.Conv2d(hidden, channels, kernel_size=1)
+        self.update_gate = nn.Conv2d(hidden, channels, kernel_size=1)
+
+        self.register_buffer("source_down_kernel", self._make_kernel(vertical="down", horizontal="right"))
+        self.register_buffer("source_up_kernel", self._make_kernel(vertical="up", horizontal="right"))
+        self.register_buffer("sink_down_kernel", self._make_kernel(vertical="down", horizontal="left"))
+        self.register_buffer("sink_up_kernel", self._make_kernel(vertical="up", horizontal="left"))
+        self.register_buffer("diffuse_kernel", self._make_diffuse_kernel())
+
+        nn.init.normal_(self.delta.weight, mean=0.0, std=5e-3)
+        nn.init.zeros_(self.delta.bias)
+        nn.init.zeros_(self.update_gate.weight)
+        nn.init.zeros_(self.update_gate.bias)
+
+    @staticmethod
+    def _make_kernel(*, vertical: str, horizontal: str) -> torch.Tensor:
+        kernel = torch.zeros(1, 1, 3, 3)
+        vertical_row = 0 if vertical == "down" else 2
+        horizontal_col = 0 if horizontal == "right" else 2
+        kernel[0, 0, vertical_row, 1] = 0.32
+        kernel[0, 0, 1, horizontal_col] = 0.32
+        kernel[0, 0, vertical_row, horizontal_col] = 0.18
+        kernel[0, 0, 1, 1] = 0.18
+        return kernel
+
+    @staticmethod
+    def _make_diffuse_kernel() -> torch.Tensor:
+        kernel = torch.zeros(1, 1, 3, 3)
+        kernel[0, 0, 1, 1] = 0.52
+        kernel[0, 0, 0, 1] = 0.12
+        kernel[0, 0, 1, 0] = 0.12
+        kernel[0, 0, 1, 2] = 0.12
+        kernel[0, 0, 2, 1] = 0.12
+        return kernel
+
+    @staticmethod
+    def _propagate(wave: torch.Tensor, kernel: torch.Tensor, marker: torch.Tensor) -> torch.Tensor:
+        propagated = torch.nn.functional.conv2d(wave, kernel, padding=1)
+        return (marker + propagated * 0.96).clamp(-4.0, 4.0)
+
+    def _anchor_target(self, anchor: torch.Tensor, incoming: torch.Tensor, marker: torch.Tensor) -> torch.Tensor:
+        diffused_anchor = torch.nn.functional.conv2d(anchor, self.diffuse_kernel, padding=1) * 0.88
+        return torch.where(marker.bool(), incoming, diffused_anchor).clamp(-4.0, 4.0)
+
+    def forward(self, state: torch.Tensor) -> torch.Tensor:
+        source_marker = (state[:, self.source_a : self.source_a + 1] + state[:, self.source_b : self.source_b + 1]).clamp(0.0, 1.0)
+        sink_marker = state[:, self.sink : self.sink + 1].clamp(0.0, 1.0)
+        rank_slice = slice(self.rank_start, self.rank_start + 8)
+        rank_features = state[:, rank_slice]
+
+        source_down_state = state[:, self.source_down : self.source_down + 1]
+        source_up_state = state[:, self.source_up : self.source_up + 1]
+        sink_down_state = state[:, self.sink_down : self.sink_down + 1]
+        sink_up_state = state[:, self.sink_up : self.sink_up + 1]
+        source_at_sink_down_state = state[:, self.source_at_sink_down : self.source_at_sink_down + 1]
+        source_at_sink_up_state = state[:, self.source_at_sink_up : self.source_at_sink_up + 1]
+        sink_at_source_down_state = state[:, self.sink_at_source_down : self.sink_at_source_down + 1]
+        sink_at_source_up_state = state[:, self.sink_at_source_up : self.sink_at_source_up + 1]
+
+        perceived = self.perception(state)
+        rank_context = self.rank_read(rank_features)
+        readout = self.readout(torch.cat([perceived, rank_context], dim=1))
+        delta = self.delta(readout) * torch.sigmoid(self.update_gate(readout))
+
+        source_down_target = self._propagate(source_down_state, self.source_down_kernel, source_marker)
+        source_up_target = self._propagate(source_up_state, self.source_up_kernel, source_marker)
+        sink_down_target = self._propagate(sink_down_state, self.sink_down_kernel, sink_marker)
+        sink_up_target = self._propagate(sink_up_state, self.sink_up_kernel, sink_marker)
+        wave_targets = torch.cat(
+            [
+                source_down_target,
+                source_up_target,
+                sink_down_target,
+                sink_up_target,
+                self._anchor_target(source_at_sink_down_state, source_down_target, sink_marker),
+                self._anchor_target(source_at_sink_up_state, source_up_target, sink_marker),
+                self._anchor_target(sink_at_source_down_state, sink_down_target, source_marker),
+                self._anchor_target(sink_at_source_up_state, sink_up_target, source_marker),
+            ],
+            dim=1,
+        )
+        wave_delta = (wave_targets - rank_features) * torch.sigmoid(self.wave_gate(perceived)) * 0.40
+
+        delta = delta.clone()
+        delta[:, rank_slice] = wave_delta
+        return delta
+
+
+UPDATE_RULES = ("standard", "gated_message", "self_tagging", "rank_binding", "sink_stabilized_rank")

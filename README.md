@@ -142,6 +142,7 @@ These are run artifacts, not hardcoded scores:
 - Multi-pair v0.5 uncued crossing benchmark: the gate is now explicit and rejects route-cued checkpoints. The standard adjacent checkpoint reached held-out `target_set_accuracy = 0.52734375` on uncued reverse crossing, so it fails. A first learned internal message-slot/gated update also failed: small gated checkpoint held out at `0.3385416666666667`; larger gated checkpoint held out at `0.2552083333333333`. Controls still dropped under ablation, so the failure is not a control leak; the missing piece is stable all-pair binding.
 - Multi-pair v0.6 self-tagging benchmark: arbitrary random unmarked permutations are intentionally not used because they are not determined by the input. Instead v0.6 adds a deterministic cyclic assignment stress probe and a `self_tagging` update rule with persistent internal tag slots. The old adjacent checkpoint reached reverse `0.51953125` and cycle `0.265625`. The first self-tagging checkpoint reached reverse `0.23697916666666666`, cycle `0.24609375`; after lower-rate continuation it reached reverse `0.2421875`, injury `0.27734375`, cycle `0.2109375`. Result: self-tagging as implemented does not solve uncued binding.
 - Multi-pair v0.7 rank-binding benchmark: added internal directional source/sink order waves, a binding curriculum, and hidden-vector diagnostics. The continued rank-binding checkpoint reached reverse `0.2734375`, injury `0.26171875`, cycle `0.2578125`, and 2-pair reverse stress `0.6041666666666666`. Result: rank waves improve 2-pair ordering but still fail stable 3-pair binding. Diagnostics showed strong rank-wave magnitude at sources but much weaker rank-wave magnitude at sinks, suggesting the order signal is not being stabilized across the body.
+- Multi-pair v0.8 sink-stabilized rank benchmark: added lateral source/sink order waves plus endpoint anchors, and reserved those rank channels so the learned update cannot overwrite them. The continued checkpoint reached reverse `0.302734375`, injury `0.33984375`, cycle `0.31640625`, and 2-pair reverse stress `0.5`. Diagnostics now show balanced rank magnitude at sources and sinks, so signal delivery improved; stable learned matching across all 3 pairs is still not solved.
 
 Example 3-pair damaged training path:
 
@@ -295,6 +296,28 @@ PYTHONPATH=src python3 -m organism_v01.diagnose_binding \
   --report outputs/reports/diagnose-v07-rank-binding.json
 ```
 
+Train the first v0.8 sink-stabilized rank candidate:
+
+```bash
+PYTHONPATH=src python3 -m organism_v01.train \
+  --task multi \
+  --curriculum binding \
+  --steps 1200 \
+  --batch-size 32 \
+  --grid-size 16 \
+  --rollout-steps 56 \
+  --hidden-channels 32 \
+  --cell-hidden 72 \
+  --update-rule sink_stabilized_rank \
+  --damage-prob 0.10 \
+  --pair-count 3 \
+  --min-pair-spacing 1 \
+  --sink-assignment reverse \
+  --lr 0.0010 \
+  --save-model outputs/models/organism-v08-sink-stabilized-rank.pt \
+  --report outputs/reports/train-v08-sink-stabilized-rank.json
+```
+
 ## Architecture
 
 Each cell shares the same tiny update network. The body is a grid of state vectors:
@@ -320,3 +343,8 @@ The experimental `rank_binding` update adds four internal hidden channels for
 directional source/sink order waves. It is the first mechanism here to push the
 2-pair reverse stress above `0.60`, but it still does not keep three simultaneous
 bindings stable under damage.
+
+The experimental `sink_stabilized_rank` update adds lateral source/sink waves
+plus endpoint anchor channels. It fixes the source/sink rank-magnitude imbalance
+seen in v0.7 diagnostics, but the learned readout still does not generalize to
+reliable 3-pair uncued binding.

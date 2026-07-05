@@ -145,6 +145,37 @@ class OrganismTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(losses["total"]))
         self.assertGreater(grad_norm, 0.0)
 
+    def test_sink_stabilized_rank_anchors_signal_at_sink(self) -> None:
+        torch.manual_seed(17)
+        layout = ChannelLayout(hidden_channels=10)
+        batch = generate_routing_batch(batch_size=3, grid_size=10, layout=layout, seed=17)
+        model = CellularOrganism(
+            layout=layout,
+            cell_hidden=16,
+            update_rule="sink_stabilized_rank",
+        )
+
+        rollout = model(batch, steps=12)
+        losses = compute_loss(
+            rollout.final_state,
+            batch,
+            layout,
+            activity_loss=rollout.activity_loss,
+        )
+        losses["total"].backward()
+        grad_norm = sum(
+            float(parameter.grad.abs().sum())
+            for parameter in model.parameters()
+            if parameter.grad is not None
+        )
+        source_at_sink_channels = slice(layout.hidden_start + 4, layout.hidden_start + 6)
+        sink_anchor_energy = (rollout.final_state[:, source_at_sink_channels] * batch.sink_mask).detach().abs().sum()
+
+        self.assertTrue(torch.allclose(rollout.final_state[:, : layout.env_count], batch.env))
+        self.assertGreater(float(sink_anchor_energy), 0.0)
+        self.assertTrue(torch.isfinite(losses["total"]))
+        self.assertGreater(grad_norm, 0.0)
+
     def test_rollout_returns_frames_and_can_continue(self) -> None:
         torch.manual_seed(12)
         layout = ChannelLayout(hidden_channels=4)
