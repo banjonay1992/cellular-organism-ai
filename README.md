@@ -148,6 +148,7 @@ These are run artifacts, not hardcoded scores:
 - Multi-pair v0.12 organ-first benchmark: added a clean 3-pair benchmark, strict and routed rank-slot diagnostics, and a rank-slot organ with separate vertical morphogen waves for top/middle/bottom seeding. The first clean checkpoint passed: reverse `target_set_accuracy = 0.6419270833333334`, cycle `0.7903645833333334`, reverse strict/routed slot accuracy `0.8133680547277132 / 0.9605034776031971`, cycle strict/routed slot accuracy `0.8407118084530035 / 0.9201388893028101`, and balanced erase-rule `0.5390625` under the `0.55` gate. Damage is intentionally not part of this pass yet.
 - Multi-pair v0.13 damaged survival benchmark: added one-hot rule cues, rule-presence output gating, protected rank-slot organ updates, a final reverse/cycle curriculum, and static-damage gates. The first 5% static-damage checkpoint passed: reverse/cycle `target_set_accuracy = 0.6223958333333334 / 0.6744791666666666`, reverse/cycle routed slot accuracy `0.9192708333333334 / 0.8793402835726738`, and balanced erase-rule `0.125`. A 10% static-damage continuation also passed: reverse/cycle `target_set_accuracy = 0.5703125 / 0.8619791666666666`, reverse/cycle routed slot accuracy `0.8723958233992258 / 0.828125`, and balanced erase-rule `0.14322916666666669`.
 - Multi-pair v0.14 dynamic-injury recovery benchmark: promoted mid-rollout injury into a 3-pair reverse/cycle gate with recovery checkpoints and rank-slot diagnostics. Using the v0.13 10% static-damage checkpoint, a 48-step pre-injury / 48-step recovery run with 5% base damage plus 10% new mid-rollout injury passed. Reverse recovered from immediate `target_set_accuracy = 0.5364583333333334` to final `0.6145833333333334`; cycle recovered from `0.7447916666666666` to `0.9296875`. New blocked tissue was real: reverse/cycle newly blocked fractions were `0.06282552052289248 / 0.06150535323346654`.
+- Multi-pair v0.15 compounded-damage benchmark: added dynamic-injury training and a harder default benchmark with 10% base damage plus 10% new mid-rollout injury. The v0.13 checkpoint failed this gate at reverse dynamic `target_set_accuracy = 0.4791666666666667`. After a 450-step dynamic-injury continuation, the v0.15 checkpoint passed: reverse/cycle final dynamic `target_set_accuracy = 0.640625 / 0.9609375`, reverse/cycle routed slot accuracy `0.7986111069718996 / 0.79253472139438`, and reverse/cycle recovery deltas `0.07291666666666663 / 0.34635416666666663`.
 
 Example 3-pair damaged training path:
 
@@ -293,6 +294,45 @@ PYTHONPATH=src python3 -m organism_v01.benchmark_v14 \
   --report outputs/reports/benchmark-v14-dynamic-injury.json
 ```
 
+Train and run the v0.15 compounded-damage recovery benchmark:
+
+```bash
+PYTHONPATH=src python3 -m organism_v01.train \
+  --task multi \
+  --curriculum rule_binding_final \
+  --steps 450 \
+  --batch-size 16 \
+  --grid-size 12 \
+  --rollout-steps 96 \
+  --hidden-channels 32 \
+  --rule-channels 3 \
+  --cell-hidden 64 \
+  --update-rule rank_slot_rule_cued \
+  --damage-prob 0.10 \
+  --dynamic-injury-prob 0.10 \
+  --dynamic-injury-pre-steps 48 \
+  --pair-count 3 \
+  --min-pair-spacing 1 \
+  --field-weight 0.5 \
+  --localization-weight 1.0 \
+  --slot-weight 0.1 \
+  --lr 0.00025 \
+  --seed 915 \
+  --init-model outputs/models/organism-v13-damage010.pt \
+  --save-model outputs/models/organism-v15-dynamic010.pt \
+  --report outputs/reports/train-v15-dynamic010.json
+
+PYTHONPATH=src python3 -m organism_v01.benchmark_v15 \
+  --model outputs/models/organism-v15-dynamic010.pt \
+  --batches 24 \
+  --batch-size 16 \
+  --grid-size 12 \
+  --rollout-steps 96 \
+  --pre-steps 48 \
+  --seed 91400 \
+  --report outputs/reports/benchmark-v15-dynamic010.json
+```
+
 Audit whether two generated assignment rules are input-identical but target-conflicting:
 
 ```bash
@@ -427,3 +467,8 @@ already spent half its rollout forming internal waves, then tracks immediate,
 12-step, 24-step, and 48-step recovery. The current checkpoint improves after
 injury on both reverse and cycle assignments while keeping routed rank-slot
 accuracy above the dynamic gate.
+
+In v0.15, the same injury mechanism is part of training. The trainer runs the
+first half of the rollout, applies new damage, then backprops through the
+recovery half against the injured batch. This teaches repair under compounded
+damage without adding pair route cues or stored answers.

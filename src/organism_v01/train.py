@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,7 @@ import torch
 from organism_v01.channels import ChannelLayout
 from organism_v01.cell import UPDATE_RULES
 from organism_v01.evaluation import choose_device, evaluate_model, save_json_report, set_seed
+from organism_v01.injury import apply_random_injury, evaluate_dynamic_injury
 from organism_v01.metrics import (
     binding_contrastive_loss,
     classification_accuracy,
@@ -20,7 +22,7 @@ from organism_v01.metrics import (
     target_set_accuracy,
 )
 from organism_v01.organism import CellularOrganism
-from organism_v01.tasks import SINK_ASSIGNMENTS, TASK_NAMES, generate_task_batch
+from organism_v01.tasks import SINK_ASSIGNMENTS, TASK_NAMES, RoutingBatch, generate_task_batch
 
 CURRICULA = ("none", "multi_pair", "binding", "rule_binding", "rule_binding_damage", "rule_binding_final")
 
@@ -53,6 +55,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--binding-weight", type=float, default=0.0)
     parser.add_argument("--binding-temperature", type=float, default=0.2)
     parser.add_argument("--slot-weight", type=float, default=0.0)
+    parser.add_argument("--dynamic-injury-prob", type=float, default=0.0)
+    parser.add_argument("--dynamic-injury-pre-steps", type=int, default=None)
     parser.add_argument("--lr", type=float, default=2e-3)
     parser.add_argument("--seed", type=int, default=11)
     parser.add_argument("--eval-batches", type=int, default=12)
@@ -62,6 +66,84 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--save-model", default="outputs/models/organism-v01.pt")
     parser.add_argument("--report", default="outputs/reports/train-v01.json")
     return parser
+
+
+@dataclass(frozen=True)
+class TrainingRollout:
+    final_state: torch.Tensor
+    loss_batch: RoutingBatch
+    activity_loss: torch.Tensor
+    injury_applied: bool
+    injury_prob: float
+    pre_steps: int
+    post_steps: int
+
+
+def dynamic_injury_steps(args: argparse.Namespace) -> tuple[int, int]:
+    pre_steps = (
+        int(args.dynamic_injury_pre_steps)
+        if getattr(args, "dynamic_injury_pre_steps", None) is not None
+        else max(1, int(args.rollout_steps) // 2)
+    )
+    post_steps = int(args.rollout_steps) - pre_steps
+    if pre_steps <= 0:
+        raise ValueError("--dynamic-injury-pre-steps must be positive")
+    if post_steps <= 0:
+        raise ValueError("--dynamic-injury-pre-steps must be less than --rollout-steps")
+    return pre_steps, post_steps
+
+
+def training_rollout(
+    model: CellularOrganism,
+    batch: RoutingBatch,
+    layout: ChannelLayout,
+    args: argparse.Namespace,
+    *,
+    step: int,
+    device: torch.device,
+) -> TrainingRollout:
+    injury_prob = float(getattr(args, "dynamic_injury_prob", 0.0))
+    if injury_prob <= 0.0:
+        rollout = model(batch, steps=args.rollout_steps)
+        return TrainingRollout(
+            final_state=rollout.final_state,
+            loss_batch=batch,
+            activity_loss=rollout.activity_loss,
+            injury_applied=False,
+            injury_prob=0.0,
+            pre_steps=args.rollout_steps,
+            post_steps=0,
+        )
+
+    if not 0.0 <= injury_prob < 0.8:
+        raise ValueError("--dynamic-injury-prob must be in [0.0, 0.8)")
+
+    pre_steps, post_steps = dynamic_injury_steps(args)
+    before_injury = model(batch, steps=pre_steps)
+    injured = apply_random_injury(
+        batch,
+        layout,
+        injury_prob=injury_prob,
+        seed=int(args.seed) + 200_000 + step,
+    ).to(device)
+    after_injury = model(
+        injured,
+        steps=post_steps,
+        start_state=before_injury.final_state,
+        start_step=pre_steps,
+    )
+    activity_loss = (
+        before_injury.activity_loss * pre_steps + after_injury.activity_loss * post_steps
+    ) / int(args.rollout_steps)
+    return TrainingRollout(
+        final_state=after_injury.final_state,
+        loss_batch=injured,
+        activity_loss=activity_loss,
+        injury_applied=True,
+        injury_prob=injury_prob,
+        pre_steps=pre_steps,
+        post_steps=post_steps,
+    )
 
 
 def curriculum_batch_params(args: argparse.Namespace, step: int) -> dict[str, float | int | str | bool]:
@@ -277,6 +359,13 @@ def main() -> None:
     args = build_parser().parse_args()
     if args.steps <= 0:
         raise ValueError("--steps must be positive")
+    if not 0.0 <= args.dynamic_injury_prob < 0.8:
+        raise ValueError("--dynamic-injury-prob must be in [0.0, 0.8)")
+    if args.dynamic_injury_prob > 0.0:
+        dynamic_pre_steps, dynamic_post_steps = dynamic_injury_steps(args)
+    else:
+        dynamic_pre_steps = args.rollout_steps
+        dynamic_post_steps = 0
 
     device = choose_device(args.device)
     set_seed(args.seed)
@@ -328,6 +417,31 @@ def main() -> None:
         localization_margin=args.localization_margin,
         activity_weight=args.activity_weight,
     )
+    baseline_dynamic_metrics = None
+    if args.dynamic_injury_prob > 0.0:
+        baseline_dynamic_metrics = evaluate_dynamic_injury(
+            model,
+            layout,
+            batches=args.eval_batches,
+            batch_size=args.batch_size,
+            grid_size=args.grid_size,
+            pre_steps=dynamic_pre_steps,
+            post_steps=dynamic_post_steps,
+            damage_prob=args.damage_prob,
+            injury_prob=args.dynamic_injury_prob,
+            task=args.task,
+            coordinate_fields=args.coordinate_fields,
+            pair_count=args.pair_count,
+            min_pair_spacing=args.min_pair_spacing,
+            sink_assignment=args.sink_assignment,
+            memory_input_steps=args.memory_input_steps,
+            seed=args.seed + 15_000,
+            device=device,
+            field_weight=args.field_weight,
+            localization_weight=args.localization_weight,
+            localization_margin=args.localization_margin,
+            activity_weight=args.activity_weight,
+        )
 
     history: list[dict[str, float | int | str]] = []
     for step in range(1, args.steps + 1):
@@ -347,10 +461,17 @@ def main() -> None:
             seed=args.seed + 100_000 + step,
             device=device,
         )
-        rollout = model(batch, steps=args.rollout_steps)
+        rollout = training_rollout(
+            model,
+            batch,
+            layout,
+            args,
+            step=step,
+            device=device,
+        )
         losses = compute_loss(
             rollout.final_state,
-            batch,
+            rollout.loss_batch,
             layout,
             activity_loss=rollout.activity_loss,
             field_weight=args.field_weight,
@@ -362,7 +483,7 @@ def main() -> None:
             losses = dict(losses)
             binding_loss = binding_contrastive_loss(
                 rollout.final_state,
-                batch,
+                rollout.loss_batch,
                 layout,
                 temperature=args.binding_temperature,
             )
@@ -372,7 +493,7 @@ def main() -> None:
             losses = dict(losses)
             slot_loss = rank_slot_supervision_loss(
                 rollout.final_state,
-                batch,
+                rollout.loss_batch,
                 layout,
             )
             losses["slot"] = slot_loss
@@ -384,16 +505,20 @@ def main() -> None:
         optimizer.step()
 
         if step == 1 or step % args.log_every == 0 or step == args.steps:
-            accuracy = classification_accuracy(rollout.final_state.detach(), batch, layout)
-            set_accuracy = target_set_accuracy(rollout.final_state.detach(), batch, layout)
-            slot_accuracy = rank_slot_accuracy(rollout.final_state.detach(), batch, layout)
-            routed_slot_accuracy = rank_slot_routed_accuracy(rollout.final_state.detach(), batch, layout)
-            margin = mean_sink_margin(rollout.final_state.detach(), batch, layout)
+            accuracy = classification_accuracy(rollout.final_state.detach(), rollout.loss_batch, layout)
+            set_accuracy = target_set_accuracy(rollout.final_state.detach(), rollout.loss_batch, layout)
+            slot_accuracy = rank_slot_accuracy(rollout.final_state.detach(), rollout.loss_batch, layout)
+            routed_slot_accuracy = rank_slot_routed_accuracy(rollout.final_state.detach(), rollout.loss_batch, layout)
+            margin = mean_sink_margin(rollout.final_state.detach(), rollout.loss_batch, layout)
             row = {
                 "step": step,
                 "train_pair_count": int(batch_params["pair_count"]),
                 "train_damage_prob": float(batch_params["damage_prob"]),
                 "train_sink_assignment": str(batch_params["sink_assignment"]),
+                "train_dynamic_injury": int(rollout.injury_applied),
+                "train_injury_prob": rollout.injury_prob,
+                "train_pre_steps": rollout.pre_steps,
+                "train_post_steps": rollout.post_steps,
                 "loss": float(losses["total"].item()),
                 "task_loss": float(losses["task"].item()),
                 "sink_loss": float(losses["sink"].item()),
@@ -431,6 +556,31 @@ def main() -> None:
         localization_margin=args.localization_margin,
         activity_weight=args.activity_weight,
     )
+    trained_dynamic_metrics = None
+    if args.dynamic_injury_prob > 0.0:
+        trained_dynamic_metrics = evaluate_dynamic_injury(
+            model,
+            layout,
+            batches=args.eval_batches,
+            batch_size=args.batch_size,
+            grid_size=args.grid_size,
+            pre_steps=dynamic_pre_steps,
+            post_steps=dynamic_post_steps,
+            damage_prob=args.damage_prob,
+            injury_prob=args.dynamic_injury_prob,
+            task=args.task,
+            coordinate_fields=args.coordinate_fields,
+            pair_count=args.pair_count,
+            min_pair_spacing=args.min_pair_spacing,
+            sink_assignment=args.sink_assignment,
+            memory_input_steps=args.memory_input_steps,
+            seed=args.seed + 25_000,
+            device=device,
+            field_weight=args.field_weight,
+            localization_weight=args.localization_weight,
+            localization_margin=args.localization_margin,
+            activity_weight=args.activity_weight,
+        )
 
     report = {
         "version_goal": f"cellular organism generated {args.task} task",
@@ -462,13 +612,17 @@ def main() -> None:
             "binding_weight": args.binding_weight,
             "binding_temperature": args.binding_temperature,
             "slot_weight": args.slot_weight,
+            "dynamic_injury_prob": args.dynamic_injury_prob,
+            "dynamic_injury_pre_steps": args.dynamic_injury_pre_steps,
             "lr": args.lr,
             "seed": args.seed,
             "eval_batches": args.eval_batches,
             "init_model": args.init_model,
         },
         "baseline_untrained": baseline_metrics,
+        "baseline_dynamic_injury": baseline_dynamic_metrics,
         "trained": trained_metrics,
+        "trained_dynamic_injury": trained_dynamic_metrics,
         "improvement": {
             "accuracy": trained_metrics["accuracy"] - baseline_metrics["accuracy"],
             "target_set_accuracy": trained_metrics["target_set_accuracy"] - baseline_metrics["target_set_accuracy"],

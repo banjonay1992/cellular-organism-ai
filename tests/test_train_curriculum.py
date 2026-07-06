@@ -12,7 +12,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from organism_v01.channels import ChannelLayout
 from organism_v01.organism import CellularOrganism
-from organism_v01.train import build_parser, curriculum_batch_params, load_initial_model
+from organism_v01.tasks import generate_task_batch
+from organism_v01.train import (
+    build_parser,
+    curriculum_batch_params,
+    dynamic_injury_steps,
+    load_initial_model,
+    training_rollout,
+)
 
 
 class TrainCurriculumTests(unittest.TestCase):
@@ -20,6 +27,51 @@ class TrainCurriculumTests(unittest.TestCase):
         args = build_parser().parse_args(["--slot-weight", "0.4"])
 
         self.assertEqual(args.slot_weight, 0.4)
+
+    def test_parser_exposes_dynamic_injury_training_args(self) -> None:
+        args = build_parser().parse_args(
+            ["--dynamic-injury-prob", "0.2", "--dynamic-injury-pre-steps", "7", "--rollout-steps", "20"]
+        )
+
+        self.assertEqual(args.dynamic_injury_prob, 0.2)
+        self.assertEqual(dynamic_injury_steps(args), (7, 13))
+
+    def test_training_rollout_applies_mid_rollout_injury_when_enabled(self) -> None:
+        layout = ChannelLayout(hidden_channels=8)
+        model = CellularOrganism(layout=layout, cell_hidden=8)
+        batch = generate_task_batch(
+            task="multi",
+            batch_size=2,
+            grid_size=8,
+            layout=layout,
+            damage_prob=0.0,
+            pair_count=2,
+            min_pair_spacing=1,
+            sink_assignment="reverse",
+            seed=44,
+        )
+        args = argparse.Namespace(
+            rollout_steps=2,
+            dynamic_injury_prob=0.25,
+            dynamic_injury_pre_steps=1,
+            seed=55,
+        )
+
+        rollout = training_rollout(
+            model,
+            batch,
+            layout,
+            args,
+            step=3,
+            device=next(model.parameters()).device,
+        )
+
+        self.assertTrue(rollout.injury_applied)
+        self.assertEqual((rollout.pre_steps, rollout.post_steps), (1, 1))
+        self.assertGreaterEqual(
+            float(rollout.loss_batch.env[:, layout.blocked].sum()),
+            float(batch.env[:, layout.blocked].sum()),
+        )
 
     def test_multi_pair_curriculum_ramps_to_final_task(self) -> None:
         args = argparse.Namespace(
