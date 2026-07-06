@@ -303,6 +303,34 @@ class OrganismTests(unittest.TestCase):
         self.assertGreaterEqual(rank_slot_accuracy(rollout.final_state, batch, layout), 0.70)
         self.assertGreaterEqual(rank_slot_routed_accuracy(rollout.final_state, batch, layout), 0.90)
 
+    def test_rank_slot_rule_cued_one_hot_rule_presence_gates_sink_readout(self) -> None:
+        torch.manual_seed(22)
+        layout = ChannelLayout(hidden_channels=32, rule_channels=3)
+        batch = generate_multi_pair_batch(
+            batch_size=2,
+            grid_size=12,
+            layout=layout,
+            pair_count=3,
+            sink_assignment="reverse",
+            damage_prob=0.0,
+            seed=126,
+        )
+        blank_rule_initial = batch.initial.clone()
+        blank_rule_initial[:, layout.rule_slice] = 0.0
+        model = CellularOrganism(
+            layout=layout,
+            cell_hidden=16,
+            update_rule="rank_slot_rule_cued",
+        )
+
+        valid_delta = model.cell_update(batch.initial)
+        blank_delta = model.cell_update(blank_rule_initial)
+
+        valid_output_energy = (valid_delta[:, layout.output_slice] * batch.sink_mask).abs().sum().detach()
+        blank_output_energy = (blank_delta[:, layout.output_slice] * batch.sink_mask).abs().sum().detach()
+        self.assertGreater(float(valid_output_energy), 0.0)
+        self.assertLess(float(blank_output_energy), float(valid_output_energy) * 0.5)
+
     def test_rollout_returns_frames_and_can_continue(self) -> None:
         torch.manual_seed(12)
         layout = ChannelLayout(hidden_channels=4)

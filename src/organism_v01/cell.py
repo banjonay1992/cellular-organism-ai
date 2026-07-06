@@ -625,7 +625,6 @@ class RankSlotRuleCuedCellUpdate(nn.Module):
             nn.SiLU(),
         )
         self.organ_channels = 20
-        self.wave_gate = nn.Conv2d(hidden, self.organ_channels, kernel_size=1)
         self.match_read = nn.Conv2d(self.organ_channels, 16, kernel_size=1)
         self.readout = nn.Sequential(
             nn.Conv2d(hidden + 16, hidden, kernel_size=1),
@@ -636,9 +635,9 @@ class RankSlotRuleCuedCellUpdate(nn.Module):
         self.delta = nn.Conv2d(hidden, channels, kernel_size=1)
         self.update_gate = nn.Conv2d(hidden, channels, kernel_size=1)
         self.local_match = nn.Sequential(
-            nn.Conv2d(self.organ_channels + rule_channels, 24, kernel_size=1),
+            nn.Conv2d(self.organ_channels + rule_channels, 48, kernel_size=1),
             nn.SiLU(),
-            nn.Conv2d(24, 2, kernel_size=1),
+            nn.Conv2d(48, 2, kernel_size=1),
         )
 
         self.register_buffer("source_down_kernel", SinkStabilizedRankCellUpdate._make_kernel(vertical="down", horizontal="right"))
@@ -663,11 +662,9 @@ class RankSlotRuleCuedCellUpdate(nn.Module):
         nn.init.zeros_(self.delta.bias)
         nn.init.zeros_(self.update_gate.weight)
         nn.init.zeros_(self.update_gate.bias)
-        nn.init.zeros_(self.wave_gate.weight)
-        nn.init.constant_(self.wave_gate.bias, 2.0)
         final_match = self.local_match[-1]
         if isinstance(final_match, nn.Conv2d):
-            nn.init.normal_(final_match.weight, mean=0.0, std=1e-3)
+            nn.init.normal_(final_match.weight, mean=0.0, std=5e-3)
             nn.init.zeros_(final_match.bias)
 
     @staticmethod
@@ -768,13 +765,17 @@ class RankSlotRuleCuedCellUpdate(nn.Module):
             ],
             dim=1,
         )
-        wave_delta = (wave_targets - match_features) * torch.sigmoid(self.wave_gate(perceived)) * 0.40
+        wave_delta = (wave_targets - match_features) * 0.40
 
         rule_context = state[:, self.rule_start : self.rule_start + self.rule_channels]
         local_output = self.local_match(torch.cat([wave_targets, rule_context], dim=1)) * sink_marker
+        output_delta = local_output
+        if self.rule_channels > 1:
+            rule_presence = rule_context.sum(dim=1, keepdim=True).clamp(0.0, 1.0)
+            output_delta = (delta[:, self.output_start : self.output_start + 2] + local_output) * rule_presence
         delta = delta.clone()
         delta[:, match_slice] = wave_delta
-        delta[:, self.output_start : self.output_start + 2] = delta[:, self.output_start : self.output_start + 2] + local_output
+        delta[:, self.output_start : self.output_start + 2] = output_delta
         return delta
 
 

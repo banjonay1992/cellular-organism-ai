@@ -119,6 +119,64 @@ class TrainCurriculumTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             curriculum_batch_params(args, 1)
 
+    def test_rule_binding_damage_curriculum_ramps_damage_after_clean_organs(self) -> None:
+        args = argparse.Namespace(
+            task="multi",
+            curriculum="rule_binding_damage",
+            steps=100,
+            pair_count=3,
+            damage_prob=0.10,
+            coordinate_fields=True,
+            min_pair_spacing=1,
+            sink_assignment="reverse",
+            memory_input_steps=4,
+            rule_channels=3,
+        )
+
+        one_pair = curriculum_batch_params(args, 1)
+        three_reverse_clean = curriculum_batch_params(args, 45)
+        three_cycle_clean = curriculum_batch_params(args, 60)
+        light_damage = curriculum_batch_params(args, 70)
+        medium_damage = curriculum_batch_params(args, 80)
+        full_damage = curriculum_batch_params(args, 95)
+
+        self.assertEqual((one_pair["pair_count"], one_pair["sink_assignment"], one_pair["damage_prob"]), (1, "aligned", 0.0))
+        self.assertEqual((three_reverse_clean["pair_count"], three_reverse_clean["sink_assignment"]), (3, "reverse"))
+        self.assertEqual(three_reverse_clean["damage_prob"], 0.0)
+        self.assertEqual((three_cycle_clean["pair_count"], three_cycle_clean["sink_assignment"]), (3, "cycle"))
+        self.assertEqual(three_cycle_clean["damage_prob"], 0.0)
+        self.assertAlmostEqual(float(light_damage["damage_prob"]), 0.025)
+        self.assertAlmostEqual(float(medium_damage["damage_prob"]), 0.05)
+        self.assertAlmostEqual(float(full_damage["damage_prob"]), 0.10)
+
+        args.rule_channels = 0
+        with self.assertRaises(ValueError):
+            curriculum_batch_params(args, 1)
+
+    def test_rule_binding_final_curriculum_alternates_three_pair_rules_immediately(self) -> None:
+        args = argparse.Namespace(
+            task="multi",
+            curriculum="rule_binding_final",
+            steps=100,
+            pair_count=3,
+            damage_prob=0.05,
+            coordinate_fields=True,
+            min_pair_spacing=1,
+            sink_assignment="reverse",
+            memory_input_steps=4,
+            rule_channels=3,
+        )
+
+        odd_step = curriculum_batch_params(args, 1)
+        even_step = curriculum_batch_params(args, 2)
+
+        self.assertEqual((odd_step["pair_count"], odd_step["sink_assignment"], odd_step["damage_prob"]), (3, "reverse", 0.05))
+        self.assertEqual((even_step["pair_count"], even_step["sink_assignment"], even_step["damage_prob"]), (3, "cycle", 0.05))
+
+        args.rule_channels = 0
+        with self.assertRaises(ValueError):
+            curriculum_batch_params(args, 1)
+
     def test_load_initial_model_restores_weights(self) -> None:
         layout = ChannelLayout(hidden_channels=4)
         source = CellularOrganism(layout=layout, cell_hidden=16)

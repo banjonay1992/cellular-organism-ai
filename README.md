@@ -146,6 +146,7 @@ These are run artifacts, not hardcoded scores:
 - Multi-pair v0.9 matching-readout benchmark: added a sink-local readout over source-label waves and an optional contrastive endpoint binding loss. The first matching-readout checkpoint reached reverse `0.26953125`, injury `0.296875`, cycle `0.265625`, and 2-pair reverse stress `0.5416666666666666`. A binding-loss continuation reached reverse `0.263671875`, injury `0.28515625`, cycle `0.27734375`, and 2-pair reverse stress `0.4270833333333333`. Result: the readout can exploit easier 2-pair structure, but endpoint embeddings stayed near random for 3-pair binding.
 - Assignment ambiguity audit: reverse and cycle assignments can present identical inputs with different targets. In `outputs/reports/assignment-ambiguity-reverse-cycle.json`, reverse vs cycle had identical inputs for `2048 / 2048` sampled items and conflicting targets for `1001 / 2048` items. That means one uncued model cannot be expected to satisfy both reverse and cycle rules simultaneously without an assignment/rule cue; the cycle check is useful as a contradiction probe, not as a fair all-in-one pass gate for uncued inputs.
 - Multi-pair v0.12 organ-first benchmark: added a clean 3-pair benchmark, strict and routed rank-slot diagnostics, and a rank-slot organ with separate vertical morphogen waves for top/middle/bottom seeding. The first clean checkpoint passed: reverse `target_set_accuracy = 0.6419270833333334`, cycle `0.7903645833333334`, reverse strict/routed slot accuracy `0.8133680547277132 / 0.9605034776031971`, cycle strict/routed slot accuracy `0.8407118084530035 / 0.9201388893028101`, and balanced erase-rule `0.5390625` under the `0.55` gate. Damage is intentionally not part of this pass yet.
+- Multi-pair v0.13 damaged survival benchmark: added one-hot rule cues, rule-presence output gating, protected rank-slot organ updates, a final reverse/cycle curriculum, and static-damage gates. The first 5% static-damage checkpoint passed: reverse/cycle `target_set_accuracy = 0.6223958333333334 / 0.6744791666666666`, reverse/cycle routed slot accuracy `0.9192708333333334 / 0.8793402835726738`, and balanced erase-rule `0.125`. A 10% static-damage continuation also passed: reverse/cycle `target_set_accuracy = 0.5703125 / 0.8619791666666666`, reverse/cycle routed slot accuracy `0.8723958233992258 / 0.828125`, and balanced erase-rule `0.14322916666666669`.
 
 Example 3-pair damaged training path:
 
@@ -258,6 +259,21 @@ PYTHONPATH=src python3 -m organism_v01.benchmark_v12 \
   --rollout-steps 96 \
   --seed 51000 \
   --report outputs/reports/benchmark-v12-slot-organ-clean-smoke.json
+```
+
+Run the v0.13 static-damage 3-pair survival benchmark:
+
+```bash
+PYTHONPATH=src python3 -m organism_v01.benchmark_v13 \
+  --model outputs/models/organism-v13-damage010.pt \
+  --batches 24 \
+  --control-batches 12 \
+  --batch-size 16 \
+  --grid-size 12 \
+  --rollout-steps 96 \
+  --damage-prob 0.10 \
+  --seed 69100 \
+  --report outputs/reports/benchmark-v13-damage010.json
 ```
 
 Audit whether two generated assignment rules are input-identical but target-conflicting:
@@ -382,3 +398,8 @@ label slots and a global rule cue. In v0.12, those slots are seeded by separate
 vertical morphogen waves, then carried rightward through local tissue dynamics.
 This is the first mechanism here to pass the clean 3-pair reverse/cycle gate
 without pair route cues or stored answer tables.
+
+In v0.13, `rank_slot_rule_cued` uses one-hot rule cues and gates output by rule
+presence, so erasing the rule cue produces a true blank instead of an accidental
+default rule. Its rank-slot organ update is protected from learned throttling,
+and the trained checkpoint survives static damage up to the current 10% gate.

@@ -22,7 +22,7 @@ from organism_v01.metrics import (
 from organism_v01.organism import CellularOrganism
 from organism_v01.tasks import SINK_ASSIGNMENTS, TASK_NAMES, generate_task_batch
 
-CURRICULA = ("none", "multi_pair", "binding", "rule_binding")
+CURRICULA = ("none", "multi_pair", "binding", "rule_binding", "rule_binding_damage", "rule_binding_final")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -71,14 +71,18 @@ def curriculum_batch_params(args: argparse.Namespace, step: int) -> dict[str, fl
 
     sink_assignment = args.sink_assignment
 
-    if args.curriculum in {"multi_pair", "binding", "rule_binding"}:
+    if args.curriculum in {"multi_pair", "binding", "rule_binding", "rule_binding_damage", "rule_binding_final"}:
         if args.task != "multi":
             raise ValueError(f"--curriculum {args.curriculum} requires --task multi")
-        if args.curriculum == "rule_binding" and int(getattr(args, "rule_channels", 0)) < 1:
-            raise ValueError("--curriculum rule_binding requires --rule-channels >= 1")
+        if args.curriculum in {"rule_binding", "rule_binding_damage", "rule_binding_final"} and int(getattr(args, "rule_channels", 0)) < 1:
+            raise ValueError(f"--curriculum {args.curriculum} requires --rule-channels >= 1")
         progress = step / max(args.steps, 1)
         task = "multi"
-        if args.curriculum == "multi_pair":
+        if args.curriculum == "rule_binding_final":
+            pair_count = args.pair_count
+            sink_assignment = "reverse" if step % 2 else "cycle"
+            damage_prob = args.damage_prob
+        elif args.curriculum == "multi_pair":
             if progress < 0.20:
                 pair_count = 1
                 damage_prob = 0.0
@@ -119,7 +123,7 @@ def curriculum_batch_params(args: argparse.Namespace, step: int) -> dict[str, fl
                 pair_count = args.pair_count
                 sink_assignment = args.sink_assignment
                 damage_prob = args.damage_prob
-        else:
+        elif args.curriculum == "rule_binding":
             if progress < 0.15:
                 pair_count = 1
                 sink_assignment = "aligned"
@@ -140,6 +144,39 @@ def curriculum_batch_params(args: argparse.Namespace, step: int) -> dict[str, fl
                 pair_count = args.pair_count
                 sink_assignment = "cycle"
                 damage_prob = 0.0
+            else:
+                pair_count = args.pair_count
+                sink_assignment = "reverse" if step % 2 else "cycle"
+                damage_prob = args.damage_prob
+        else:
+            if progress < 0.12:
+                pair_count = 1
+                sink_assignment = "aligned"
+                damage_prob = 0.0
+            elif progress < 0.24:
+                pair_count = min(2, args.pair_count)
+                sink_assignment = "aligned"
+                damage_prob = 0.0
+            elif progress < 0.36:
+                pair_count = min(2, args.pair_count)
+                sink_assignment = "reverse"
+                damage_prob = 0.0
+            elif progress < 0.50:
+                pair_count = args.pair_count
+                sink_assignment = "reverse"
+                damage_prob = 0.0
+            elif progress < 0.62:
+                pair_count = args.pair_count
+                sink_assignment = "cycle"
+                damage_prob = 0.0
+            elif progress < 0.75:
+                pair_count = args.pair_count
+                sink_assignment = "reverse" if step % 2 else "cycle"
+                damage_prob = args.damage_prob * 0.25
+            elif progress < 0.88:
+                pair_count = args.pair_count
+                sink_assignment = "reverse" if step % 2 else "cycle"
+                damage_prob = args.damage_prob * 0.50
             else:
                 pair_count = args.pair_count
                 sink_assignment = "reverse" if step % 2 else "cycle"
