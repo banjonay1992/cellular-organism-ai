@@ -152,6 +152,7 @@ These are run artifacts, not hardcoded scores:
 - Multi-pair v0.16 generalization audit: added a scenario matrix over unseen seeds, injury timing, injury severity, mild damage, and a larger 14x14 grid. The v0.15 checkpoint passed 5 of 6 scenarios. It passed baseline, early injury, late injury, mild damage, and higher injury. The only failure was larger-grid reverse: dynamic `target_set_accuracy = 0.4921875` in the 8-batch matrix and `0.484375` in a 16-batch confirmation run, just under the `0.50` gate. Larger-grid cycle passed at `0.875` / `0.90625`. This makes v0.17's target clear: randomized grid-size / scale-generalization recovery training.
 - Multi-pair v0.17 scale-generalized recovery: added scale-aware training choices so dynamic-injury training alternates 12x12/96-step and 14x14/112-step bodies in two-step blocks, ensuring reverse and cycle both see each scale. After a 500-step continuation from v0.15, the larger-grid reverse failure passed: 16-batch confirmation improved from `0.484375` to `0.80859375`. The full v0.16 matrix then passed 6 of 6 scenarios, with worst dynamic `target_set_accuracy = 0.765625`, mean dynamic `0.8951822916666666`, and larger-grid reverse/cycle `0.8125 / 0.953125`.
 - Multi-pair v0.18 four-pair probe: added a clean 4-pair dynamic-injury audit without changing the trained model or adding pair route cues. The fixed top/middle/bottom rank-slot diagnostics are now explicitly marked over-capacity for `pair_count = 4`, so the probe gates only live sink outputs and injury evidence. The v0.17 checkpoint did not pass the full probe because reverse finished at dynamic `target_set_accuracy = 0.3359375`, but the result exposed a useful surprise: cycle generalized strongly to four pairs, with static/dynamic `target_set_accuracy = 0.75390625 / 0.7578125`, dynamic `target_peak_accuracy = 0.9921875`, and real newly blocked tissue at `0.06391501822508872`.
+- Multi-pair v0.19 rank diagnostic: added a diagnostic-only assignment map for 4-pair aligned/cycle/reverse runs, including source-rank accuracy, sink-rank accuracy, margins, label bias, recovery curves, and exact counts of how many sinks were correct per item. The 16-batch result shows cycle is balanced across all ranks and still strong after injury: dynamic `target_set_accuracy = 0.76171875`, per-sink accuracy `0.93359375`, and all source ranks above `0.92`. Reverse is not failing uniformly: outer source ranks were `0.8984375 / 0.94921875`, but the two inner ranks were `0.59375 / 0.56640625`, leaving dynamic `target_set_accuracy = 0.390625`. This makes the next architecture target clear: separate middle ranks cleanly under the reverse transform.
 
 Example 3-pair damaged training path:
 
@@ -417,6 +418,24 @@ PYTHONPATH=src python3 -m organism_v01.benchmark_v18 \
   --report outputs/reports/benchmark-v18-four-pair.json
 ```
 
+Run the v0.19 four-pair rank diagnostic:
+
+```bash
+PYTHONPATH=src python3 -m organism_v01.benchmark_v19 \
+  --model outputs/models/organism-v17-scale.pt \
+  --batches 16 \
+  --batch-size 16 \
+  --grid-size 14 \
+  --rollout-steps 112 \
+  --pre-steps 56 \
+  --damage-prob 0.10 \
+  --injury-prob 0.10 \
+  --pair-count 4 \
+  --assignments aligned,cycle,reverse \
+  --seed 111900 \
+  --report outputs/reports/benchmark-v19-four-pair-diagnostics.json
+```
+
 Audit whether two generated assignment rules are input-identical but target-conflicting:
 
 ```bash
@@ -573,3 +592,9 @@ reported as unsupported above three pairs, while output metrics still measure
 whether the tissue answers every live sink. This exposed an asymmetry worth
 studying: the existing organism transfers surprisingly well to the four-pair
 cycle rule but not to the four-pair reverse rule.
+
+In v0.19, the diagnostic view shows why. Four-pair reverse keeps the outer
+ranks mostly intact but confuses the two inner ranks, while four-pair cycle is
+balanced across every source and sink rank. The next scalable organ should
+therefore represent relative rank with enough resolution to distinguish inner
+positions under mirror-like transforms, not just add another fixed answer slot.
