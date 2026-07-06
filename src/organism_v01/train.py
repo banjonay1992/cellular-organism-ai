@@ -31,7 +31,10 @@ CURRICULA = ("none", "multi_pair", "binding", "rule_binding", "rule_binding_dama
 COMPATIBLE_UPDATE_RULE_LOADS = {
     ("rank_slot_rule_cued", "rank_slot_repair_rule_cued"),
     ("rank_slot_rule_cued", "rank_slot_claim_rule_cued"),
+    ("rank_slot_rule_cued", "rank_slot_claim_residual_rule_cued"),
     ("rank_slot_repair_rule_cued", "rank_slot_claim_rule_cued"),
+    ("rank_slot_repair_rule_cued", "rank_slot_claim_residual_rule_cued"),
+    ("rank_slot_claim_rule_cued", "rank_slot_claim_residual_rule_cued"),
 }
 
 
@@ -70,6 +73,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--claim-weight", type=float, default=0.0)
     parser.add_argument("--train-repair-only", action="store_true")
     parser.add_argument("--train-claim-only", action="store_true")
+    parser.add_argument("--train-claim-gate-only", action="store_true")
+    parser.add_argument("--train-claim-state-only", action="store_true")
     parser.add_argument("--dynamic-injury-prob", type=float, default=0.0)
     parser.add_argument("--dynamic-injury-pre-steps", type=int, default=None)
     parser.add_argument("--lr", type=float, default=2e-3)
@@ -346,6 +351,54 @@ def checkpoint_payload(
     }
 
 
+def _channel_index_map(source: ChannelLayout, target: ChannelLayout) -> list[tuple[int, int]]:
+    pairs: list[tuple[int, int]] = []
+    for channel in range(source.env_count):
+        pairs.append((channel, channel))
+    for offset in range(source.hidden_channels):
+        pairs.append((source.hidden_start + offset, target.hidden_start + offset))
+    for offset in range(source.output_count):
+        pairs.append((source.output_start + offset, target.output_start + offset))
+    return pairs
+
+
+def _expanded_hidden_state_dict(
+    checkpoint_state: dict[str, torch.Tensor],
+    model_state: dict[str, torch.Tensor],
+    *,
+    source_layout: ChannelLayout,
+    target_layout: ChannelLayout,
+) -> dict[str, torch.Tensor]:
+    channel_map = _channel_index_map(source_layout, target_layout)
+    expanded: dict[str, torch.Tensor] = {}
+    for key, value in checkpoint_state.items():
+        if key not in model_state:
+            continue
+        target = model_state[key]
+        if tuple(target.shape) == tuple(value.shape):
+            expanded[key] = value
+            continue
+        copied = target.clone()
+        if key == "cell_update.perception.0.weight" and value.dim() == 4 and target.dim() == 4:
+            if target.shape[0] == value.shape[0] and target.shape[2:] == value.shape[2:]:
+                copied.zero_()
+                for source_channel, target_channel in channel_map:
+                    copied[:, target_channel] = value[:, source_channel]
+                expanded[key] = copied
+        elif key in {"cell_update.delta.weight", "cell_update.update_gate.weight"} and value.dim() == 4 and target.dim() == 4:
+            if target.shape[1:] == value.shape[1:]:
+                copied.zero_()
+                for source_channel, target_channel in channel_map:
+                    copied[target_channel] = value[source_channel]
+                expanded[key] = copied
+        elif key in {"cell_update.delta.bias", "cell_update.update_gate.bias"} and value.dim() == 1 and target.dim() == 1:
+            copied.zero_()
+            for source_channel, target_channel in channel_map:
+                copied[target_channel] = value[source_channel]
+            expanded[key] = copied
+    return expanded
+
+
 def load_initial_model(
     model: CellularOrganism,
     *,
@@ -370,7 +423,9 @@ def load_initial_model(
     checkpoint_update_rule = str(checkpoint.get("args", {}).get("update_rule", "standard"))
     checkpoint_message_slots = int(checkpoint.get("args", {}).get("message_slots", expected_message_slots))
     checkpoint_tag_slots = int(checkpoint.get("args", {}).get("tag_slots", expected_tag_slots))
-    if checkpoint_hidden_channels != expected_hidden_channels:
+    compatible_rule_load = (checkpoint_update_rule, expected_update_rule) in COMPATIBLE_UPDATE_RULE_LOADS
+    compatible_hidden_growth = compatible_rule_load and checkpoint_hidden_channels < expected_hidden_channels
+    if checkpoint_hidden_channels != expected_hidden_channels and not compatible_hidden_growth:
         raise ValueError(
             f"init checkpoint hidden_channels={checkpoint_hidden_channels} "
             f"does not match requested {expected_hidden_channels}"
@@ -390,7 +445,6 @@ def load_initial_model(
             f"init checkpoint rule_channels={checkpoint_rule_channels} "
             f"does not match requested {expected_rule_channels}"
         )
-    compatible_rule_load = (checkpoint_update_rule, expected_update_rule) in COMPATIBLE_UPDATE_RULE_LOADS
     if checkpoint_update_rule != expected_update_rule and not compatible_rule_load:
         raise ValueError(
             f"init checkpoint update_rule={checkpoint_update_rule} "
@@ -409,11 +463,29 @@ def load_initial_model(
     checkpoint_state = checkpoint["model_state_dict"]
     if compatible_rule_load:
         model_state = model.state_dict()
-        compatible_state = {
-            key: value
-            for key, value in checkpoint_state.items()
-            if key in model_state and tuple(model_state[key].shape) == tuple(value.shape)
-        }
+        if compatible_hidden_growth:
+            source_layout = ChannelLayout(
+                hidden_channels=checkpoint_hidden_channels,
+                route_channels=checkpoint_route_channels,
+                rule_channels=checkpoint_rule_channels,
+            )
+            target_layout = ChannelLayout(
+                hidden_channels=expected_hidden_channels,
+                route_channels=expected_route_channels,
+                rule_channels=expected_rule_channels,
+            )
+            compatible_state = _expanded_hidden_state_dict(
+                checkpoint_state,
+                model_state,
+                source_layout=source_layout,
+                target_layout=target_layout,
+            )
+        else:
+            compatible_state = {
+                key: value
+                for key, value in checkpoint_state.items()
+                if key in model_state and tuple(model_state[key].shape) == tuple(value.shape)
+            }
         model.load_state_dict(compatible_state, strict=False)
         return
 
@@ -444,6 +516,37 @@ def freeze_non_claim_parameters(model: CellularOrganism) -> int:
     return trainable_count
 
 
+def freeze_non_claim_gate_parameters(model: CellularOrganism) -> int:
+    trainable_count = 0
+    for name, parameter in model.named_parameters():
+        should_train = "claim_gate" in name
+        parameter.requires_grad_(should_train)
+        if should_train:
+            trainable_count += parameter.numel()
+    if trainable_count == 0:
+        raise ValueError("--train-claim-gate-only requires claim_gate parameters")
+    return trainable_count
+
+
+def freeze_non_claim_state_parameters(model: CellularOrganism) -> int:
+    trainable_count = 0
+    for name, parameter in model.named_parameters():
+        should_train = "claim_seed" in name
+        parameter.requires_grad_(should_train)
+        if should_train:
+            trainable_count += parameter.numel()
+    if trainable_count == 0:
+        raise ValueError("--train-claim-state-only requires claim_seed parameters")
+    return trainable_count
+
+
+def claim_channel_offset(model: CellularOrganism, layout: ChannelLayout) -> int | None:
+    claim_start = getattr(model.cell_update, "claim_start", None)
+    if claim_start is None:
+        return None
+    return int(claim_start) - layout.hidden_start
+
+
 def main() -> None:
     args = build_parser().parse_args()
     if args.steps <= 0:
@@ -455,8 +558,14 @@ def main() -> None:
     else:
         dynamic_pre_steps = args.rollout_steps
         dynamic_post_steps = 0
-    if args.train_repair_only and args.train_claim_only:
-        raise ValueError("--train-repair-only and --train-claim-only cannot both be set")
+    exclusive_modes = [
+        args.train_repair_only,
+        args.train_claim_only,
+        args.train_claim_gate_only,
+        args.train_claim_state_only,
+    ]
+    if sum(int(value) for value in exclusive_modes) > 1:
+        raise ValueError("specialized training modes are mutually exclusive")
     scale_training_params(args, 1)
 
     device = choose_device(args.device)
@@ -492,9 +601,18 @@ def main() -> None:
             raise ValueError("--train-repair-only requires --update-rule rank_slot_repair_rule_cued")
         trainable_parameter_count = freeze_non_repair_parameters(model)
     if args.train_claim_only:
-        if args.update_rule != "rank_slot_claim_rule_cued":
-            raise ValueError("--train-claim-only requires --update-rule rank_slot_claim_rule_cued")
+        if args.update_rule not in {"rank_slot_claim_rule_cued", "rank_slot_claim_residual_rule_cued"}:
+            raise ValueError("--train-claim-only requires a rank-slot claim update rule")
         trainable_parameter_count = freeze_non_claim_parameters(model)
+    if args.train_claim_gate_only:
+        if args.update_rule != "rank_slot_claim_residual_rule_cued":
+            raise ValueError("--train-claim-gate-only requires --update-rule rank_slot_claim_residual_rule_cued")
+        trainable_parameter_count = freeze_non_claim_gate_parameters(model)
+    if args.train_claim_state_only:
+        if args.update_rule not in {"rank_slot_claim_rule_cued", "rank_slot_claim_residual_rule_cued"}:
+            raise ValueError("--train-claim-state-only requires a rank-slot claim update rule")
+        trainable_parameter_count = freeze_non_claim_state_parameters(model)
+    claim_offset = claim_channel_offset(model, layout)
     optimizer = torch.optim.AdamW((parameter for parameter in model.parameters() if parameter.requires_grad), lr=args.lr)
 
     baseline_metrics = evaluate_model(
@@ -612,13 +730,14 @@ def main() -> None:
             losses["consistency"] = consistency_loss
             losses["total"] = losses["total"] + consistency_loss * args.consistency_weight
         if args.claim_weight:
-            if not hasattr(model.cell_update, "claim_start"):
+            if claim_offset is None:
                 raise ValueError("--claim-weight requires update_rule=rank_slot_claim_rule_cued")
             losses = dict(losses)
             claim_loss = rank_claim_supervision_loss(
                 rollout.final_state,
                 rollout.loss_batch,
                 layout,
+                claim_offset=claim_offset,
             )
             losses["claim"] = claim_loss
             losses["total"] = losses["total"] + claim_loss * args.claim_weight
@@ -633,7 +752,16 @@ def main() -> None:
             set_accuracy = target_set_accuracy(rollout.final_state.detach(), rollout.loss_batch, layout)
             slot_accuracy = rank_slot_accuracy(rollout.final_state.detach(), rollout.loss_batch, layout)
             routed_slot_accuracy = rank_slot_routed_accuracy(rollout.final_state.detach(), rollout.loss_batch, layout)
-            claim_accuracy = rank_claim_accuracy(rollout.final_state.detach(), rollout.loss_batch, layout)
+            claim_accuracy = (
+                rank_claim_accuracy(
+                    rollout.final_state.detach(),
+                    rollout.loss_batch,
+                    layout,
+                    claim_offset=claim_offset,
+                )
+                if claim_offset is not None
+                else 0.0
+            )
             margin = mean_sink_margin(rollout.final_state.detach(), rollout.loss_batch, layout)
             row = {
                 "step": step,
@@ -749,6 +877,8 @@ def main() -> None:
             "claim_weight": args.claim_weight,
             "train_repair_only": args.train_repair_only,
             "train_claim_only": args.train_claim_only,
+            "train_claim_gate_only": args.train_claim_gate_only,
+            "train_claim_state_only": args.train_claim_state_only,
             "trainable_parameter_count": trainable_parameter_count,
             "dynamic_injury_prob": args.dynamic_injury_prob,
             "dynamic_injury_pre_steps": args.dynamic_injury_pre_steps,

@@ -1025,10 +1025,11 @@ class RankSlotClaimRuleCuedCellUpdate(RankSlotRuleCuedCellUpdate):
         output_start: int,
         rule_start: int,
         rule_channels: int,
+        claim_base_offset: int = 20,
         hidden: int = 64,
     ) -> None:
-        if hidden_channels < 32:
-            raise ValueError("rank_slot_claim_rule_cued requires at least 32 hidden channels")
+        if hidden_channels < claim_base_offset + 12:
+            raise ValueError("rank_slot_claim_rule_cued requires enough hidden channels for claim state")
         super().__init__(
             channels,
             hidden_start=hidden_start,
@@ -1042,9 +1043,10 @@ class RankSlotClaimRuleCuedCellUpdate(RankSlotRuleCuedCellUpdate):
             hidden=hidden,
         )
 
-        self.source_rank_label_start = hidden_start + 20
+        self.claim_base_offset = claim_base_offset
+        self.source_rank_label_start = hidden_start + claim_base_offset
         self.source_rank_label_channels = 8
-        self.claim_start = hidden_start + 28
+        self.claim_start = hidden_start + claim_base_offset + self.source_rank_label_channels
         self.claim_channels = 4
         self.claim_seed = nn.Sequential(
             nn.Conv2d(self.claim_channels + rule_channels, 16, kernel_size=1),
@@ -1110,6 +1112,15 @@ class RankSlotClaimRuleCuedCellUpdate(RankSlotRuleCuedCellUpdate):
             groups=self.claim_channels,
         )
         return (claim_seed + carried * 0.96).clamp(-4.0, 4.0)
+
+    def _claim_target_from_seed(
+        self,
+        claim_state: torch.Tensor,
+        claim_seed: torch.Tensor,
+        sink_marker: torch.Tensor,
+    ) -> torch.Tensor:
+        del sink_marker
+        return self._claim_target(claim_state, claim_seed)
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         source_a_marker = state[:, self.source_a : self.source_a + 1].clamp(0.0, 1.0)
@@ -1209,7 +1220,7 @@ class RankSlotClaimRuleCuedCellUpdate(RankSlotRuleCuedCellUpdate):
         rule_context = state[:, self.rule_start : self.rule_start + self.rule_channels]
         sink_rank_bins = self._rank_bins(sink_down_state, sink_up_state)
         claim_seed = self.claim_seed(torch.cat([sink_rank_bins, rule_context], dim=1)) * sink_marker
-        claim_target = self._claim_target(claim_state, claim_seed)
+        claim_target = self._claim_target_from_seed(claim_state, claim_seed, sink_marker)
         claim_delta = (claim_target - claim_state) * 0.36
 
         base_local_output = self.local_match(torch.cat([wave_targets, rule_context], dim=1)) * sink_marker
@@ -1221,20 +1232,22 @@ class RankSlotClaimRuleCuedCellUpdate(RankSlotRuleCuedCellUpdate):
             ],
             dim=1,
         )
+        claim_context = torch.cat(
+            [
+                wave_targets,
+                source_rank_label_state,
+                claim_state,
+                claimed_label * sink_marker,
+                rule_context,
+            ],
+            dim=1,
+        )
         claim_output = self.claim_match(
-            torch.cat(
-                [
-                    wave_targets,
-                    source_rank_label_state,
-                    claim_state,
-                    claimed_label * sink_marker,
-                    rule_context,
-                ],
-                dim=1,
-            )
+            claim_context
         ) * sink_marker
 
-        output_delta = base_local_output + claim_output
+        generic_output = delta[:, self.output_start : self.output_start + 2]
+        output_delta = self._claim_output_delta(generic_output, base_local_output, claim_output, claim_context)
         if self.rule_channels > 1:
             rule_presence = rule_context.sum(dim=1, keepdim=True).clamp(0.0, 1.0)
             output_delta = output_delta * rule_presence
@@ -1245,6 +1258,80 @@ class RankSlotClaimRuleCuedCellUpdate(RankSlotRuleCuedCellUpdate):
         delta[:, claim_slice] = claim_delta
         delta[:, self.output_start : self.output_start + 2] = output_delta
         return delta
+
+    def _claim_output_delta(
+        self,
+        generic_output: torch.Tensor,
+        base_local_output: torch.Tensor,
+        claim_output: torch.Tensor,
+        claim_context: torch.Tensor,
+    ) -> torch.Tensor:
+        del generic_output, claim_context
+        return base_local_output + claim_output
+
+
+class RankSlotClaimResidualRuleCuedCellUpdate(RankSlotClaimRuleCuedCellUpdate):
+    """Rank-claim organ whose claim readout starts as a gated residual."""
+
+    def __init__(
+        self,
+        channels: int,
+        *,
+        hidden_start: int,
+        hidden_channels: int,
+        source_a: int,
+        source_b: int,
+        sink: int,
+        output_start: int,
+        rule_start: int,
+        rule_channels: int,
+        hidden: int = 64,
+    ) -> None:
+        super().__init__(
+            channels,
+            hidden_start=hidden_start,
+            hidden_channels=hidden_channels,
+            source_a=source_a,
+            source_b=source_b,
+            sink=sink,
+            output_start=output_start,
+            rule_start=rule_start,
+            rule_channels=rule_channels,
+            claim_base_offset=32,
+            hidden=hidden,
+        )
+        self.claim_gate = nn.Sequential(
+            nn.Conv2d(
+                self.organ_channels + self.source_rank_label_channels + self.claim_channels + 2 + rule_channels,
+                24,
+                kernel_size=1,
+            ),
+            nn.SiLU(),
+            nn.Conv2d(24, 2, kernel_size=1),
+        )
+        final_gate = self.claim_gate[-1]
+        if isinstance(final_gate, nn.Conv2d):
+            nn.init.zeros_(final_gate.weight)
+            nn.init.constant_(final_gate.bias, -4.0)
+
+    def _claim_output_delta(
+        self,
+        generic_output: torch.Tensor,
+        base_local_output: torch.Tensor,
+        claim_output: torch.Tensor,
+        claim_context: torch.Tensor,
+    ) -> torch.Tensor:
+        gate = torch.sigmoid(self.claim_gate(claim_context))
+        return generic_output + base_local_output + claim_output * gate
+
+    def _claim_target_from_seed(
+        self,
+        claim_state: torch.Tensor,
+        claim_seed: torch.Tensor,
+        sink_marker: torch.Tensor,
+    ) -> torch.Tensor:
+        carried = self._claim_target(claim_state, claim_seed)
+        return torch.where(sink_marker.bool(), claim_seed.clamp(-4.0, 4.0), carried)
 
 
 class RelativeRankRuleCuedCellUpdate(nn.Module):
@@ -1495,5 +1582,6 @@ UPDATE_RULES = (
     "rank_slot_rule_cued",
     "rank_slot_repair_rule_cued",
     "rank_slot_claim_rule_cued",
+    "rank_slot_claim_residual_rule_cued",
     "relative_rank_rule_cued",
 )

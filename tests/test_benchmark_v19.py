@@ -53,6 +53,39 @@ class BenchmarkV19Tests(unittest.TestCase):
         self.assertEqual(diagnostics["source_rank_accuracy"]["source_rank_1"], 0.0)
         self.assertEqual(diagnostics["sink_rank_accuracy"]["sink_rank_2"], 0.0)
 
+    def test_state_pair_diagnostics_reports_claim_rank_failures(self) -> None:
+        layout = ChannelLayout(hidden_channels=32, rule_channels=3)
+        batch = generate_multi_pair_batch(
+            batch_size=1,
+            grid_size=14,
+            layout=layout,
+            pair_count=4,
+            sink_assignment="reverse",
+            damage_prob=0.0,
+            seed=191,
+        )
+        final_state = torch.zeros_like(batch.initial)
+        claim_start = layout.hidden_start + 28
+        assert batch.pair_labels is not None
+        assert batch.pair_sink_rc is not None
+
+        for pair_index in range(4):
+            row, col = [int(value) for value in batch.pair_sink_rc[0, pair_index]]
+            label = int(batch.pair_labels[0, pair_index])
+            final_state[0, layout.output_start + label, row, col] = 5.0
+            claim_rank = pair_index
+            if pair_index == 2:
+                claim_rank = 1
+            final_state[0, claim_start + claim_rank, row, col] = 6.0
+
+        diagnostics = state_pair_diagnostics(final_state, batch, layout)
+
+        self.assertTrue(diagnostics["claim_available"])
+        self.assertEqual(diagnostics["target_set_accuracy"], 1.0)
+        self.assertEqual(diagnostics["claim_accuracy"], 0.75)
+        self.assertEqual(diagnostics["claim_source_rank_accuracy"]["source_rank_2"], 0.0)
+        self.assertEqual(diagnostics["claim_sink_rank_accuracy"]["sink_rank_1"], 0.0)
+
     def test_summary_highlights_cycle_reverse_gap_and_weakest_rank(self) -> None:
         result = {
             "cycle": _result(target_set=0.75, source_values=[0.9, 0.8, 0.7, 0.6]),
@@ -68,6 +101,7 @@ class BenchmarkV19Tests(unittest.TestCase):
             summary["assignments"]["reverse"]["weakest_source_rank"]["rank"],
             "source_rank_1",
         )
+        self.assertAlmostEqual(summary["assignments"]["reverse"]["dynamic_claim_accuracy"], 0.5)
 
     def test_parse_assignments_rejects_unknown_names(self) -> None:
         with self.assertRaises(ValueError):
@@ -89,6 +123,10 @@ def _detail(target_set: float, source_values: list[float]) -> dict[str, object]:
         "correct_count_distribution": {"0": 0.0, "1": 0.1, "2": 0.2, "3": 0.3, "4": 0.4},
         "source_rank_accuracy": source_accuracy,
         "sink_rank_accuracy": sink_accuracy,
+        "claim_available": True,
+        "claim_accuracy": 0.5,
+        "claim_source_rank_accuracy": source_accuracy,
+        "claim_sink_rank_accuracy": sink_accuracy,
     }
 
 

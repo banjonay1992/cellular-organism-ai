@@ -436,6 +436,58 @@ class OrganismTests(unittest.TestCase):
                 update_rule="rank_slot_claim_rule_cued",
             )
 
+    def test_rank_slot_claim_residual_rule_cued_starts_with_quiet_trainable_gate(self) -> None:
+        layout = ChannelLayout(hidden_channels=44, rule_channels=3)
+        model = CellularOrganism(
+            layout=layout,
+            cell_hidden=16,
+            update_rule="rank_slot_claim_residual_rule_cued",
+        )
+        cell_update = model.cell_update
+        self.assertTrue(hasattr(cell_update, "claim_gate"))
+
+        gate_input_channels = cell_update.claim_gate[0].in_channels
+        generic_output = torch.full((1, 2, 3, 3), 0.5)
+        base_output = torch.zeros(1, 2, 3, 3)
+        claim_output = torch.full_like(base_output, 10.0)
+        claim_context = torch.zeros(1, gate_input_channels, 3, 3)
+
+        gated_output = cell_update._claim_output_delta(generic_output, base_output, claim_output, claim_context)
+        gated_output.sum().backward()
+
+        self.assertGreater(float(gated_output.detach().min()), 0.5)
+        self.assertLess(float(gated_output.detach().max()), 0.7)
+        self.assertIsNotNone(cell_update.claim_gate[-1].bias.grad)
+        self.assertGreater(float(cell_update.claim_gate[-1].bias.grad.abs().sum()), 0.0)
+
+    def test_rank_slot_claim_residual_rule_cued_anchors_claim_target_at_sink(self) -> None:
+        layout = ChannelLayout(hidden_channels=44, rule_channels=3)
+        model = CellularOrganism(
+            layout=layout,
+            cell_hidden=16,
+            update_rule="rank_slot_claim_residual_rule_cued",
+        )
+        cell_update = model.cell_update
+        claim_state = torch.zeros(1, 4, 3, 3)
+        claim_seed = torch.zeros_like(claim_state)
+        sink_marker = torch.zeros(1, 1, 3, 3)
+        claim_seed[:, :, 1, 1] = torch.tensor([0.0, 1.0, 2.0, 3.0])
+        sink_marker[:, :, 1, 1] = 1.0
+
+        target = cell_update._claim_target_from_seed(claim_state, claim_seed, sink_marker)
+
+        self.assertTrue(torch.equal(target[:, :, 1, 1], claim_seed[:, :, 1, 1]))
+
+    def test_rank_slot_claim_residual_rule_cued_requires_extra_claim_channels(self) -> None:
+        layout = ChannelLayout(hidden_channels=43, rule_channels=3)
+
+        with self.assertRaises(ValueError):
+            CellularOrganism(
+                layout=layout,
+                cell_hidden=16,
+                update_rule="rank_slot_claim_residual_rule_cued",
+            )
+
     def test_relative_rank_rule_cued_separates_four_source_ranks(self) -> None:
         torch.manual_seed(23)
         layout = ChannelLayout(hidden_channels=32, rule_channels=3)

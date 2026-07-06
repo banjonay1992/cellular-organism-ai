@@ -20,6 +20,7 @@ SUPPORTED_UPDATE_RULES = {
     "rank_slot_rule_cued",
     "rank_slot_repair_rule_cued",
     "rank_slot_claim_rule_cued",
+    "rank_slot_claim_residual_rule_cued",
     "relative_rank_rule_cued",
 }
 
@@ -47,6 +48,13 @@ def _empty_detail_totals(pair_count: int) -> dict[str, Any]:
         "target_label_counts": [0, 0],
         "predicted_label_counts": [0, 0],
         "margin_sum": 0.0,
+        "claim_available": False,
+        "claim_count": 0,
+        "claim_correct": 0,
+        "claim_source_rank_correct": [0 for _ in range(pair_count)],
+        "claim_source_rank_count": [0 for _ in range(pair_count)],
+        "claim_sink_rank_correct": [0 for _ in range(pair_count)],
+        "claim_sink_rank_count": [0 for _ in range(pair_count)],
     }
 
 
@@ -81,6 +89,11 @@ def _finalize_detail_totals(totals: dict[str, Any]) -> dict[str, Any]:
     sink_counts = [int(value) for value in totals["sink_rank_count"]]
     source_accuracy = _accuracy_dict(source_correct, source_counts, "source")
     sink_accuracy = _accuracy_dict(sink_correct, sink_counts, "sink")
+    claim_source_correct = [int(value) for value in totals["claim_source_rank_correct"]]
+    claim_source_counts = [int(value) for value in totals["claim_source_rank_count"]]
+    claim_sink_correct = [int(value) for value in totals["claim_sink_rank_correct"]]
+    claim_sink_counts = [int(value) for value in totals["claim_sink_rank_count"]]
+    claim_count = int(totals["claim_count"])
 
     return {
         "item_count": item_count,
@@ -108,6 +121,18 @@ def _finalize_detail_totals(totals: dict[str, Any]) -> dict[str, Any]:
         "predicted_label_fraction": _label_fraction(
             [int(value) for value in totals["predicted_label_counts"]]
         ),
+        "claim_available": bool(totals["claim_available"]),
+        "claim_accuracy": int(totals["claim_correct"]) / claim_count if claim_count else 0.0,
+        "claim_source_rank_accuracy": _accuracy_dict(
+            claim_source_correct,
+            claim_source_counts,
+            "source",
+        ),
+        "claim_sink_rank_accuracy": _accuracy_dict(
+            claim_sink_correct,
+            claim_sink_counts,
+            "sink",
+        ),
     }
 
 
@@ -116,6 +141,8 @@ def add_state_pair_diagnostics(
     final_state: torch.Tensor,
     batch: RoutingBatch,
     layout: ChannelLayout,
+    *,
+    claim_offset: int | None = 28,
 ) -> None:
     if batch.pair_labels is None or batch.pair_sink_rc is None:
         raise ValueError("pair diagnostics require generated multi-pair metadata")
@@ -125,6 +152,15 @@ def add_state_pair_diagnostics(
     pair_labels = batch.pair_labels
     pair_sink_rc = batch.pair_sink_rc
     pair_count = pair_labels.shape[1]
+    claim_start = layout.hidden_start + claim_offset if claim_offset is not None else layout.output_start
+    has_claim_channels = (
+        claim_offset is not None
+        and pair_count <= 4
+        and layout.hidden_channels >= claim_offset + 4
+        and final_state.shape[1] >= claim_start + 4
+    )
+    claim_logits = final_state[:, claim_start : claim_start + 4] if has_claim_channels else None
+    totals["claim_available"] = bool(totals["claim_available"] or has_claim_channels)
 
     for item in range(outputs.shape[0]):
         sink_rows = pair_sink_rc[item, :, 0]
@@ -155,6 +191,16 @@ def add_state_pair_diagnostics(
             totals["predicted_label_counts"][prediction] += 1
             totals["margin_sum"] += margin
 
+            if claim_logits is not None:
+                claim_prediction = int(claim_logits[item, :, row, col].argmax(dim=0))
+                claim_correct = int(claim_prediction == pair_index)
+                totals["claim_count"] += 1
+                totals["claim_correct"] += claim_correct
+                totals["claim_source_rank_correct"][pair_index] += claim_correct
+                totals["claim_source_rank_count"][pair_index] += 1
+                totals["claim_sink_rank_correct"][sink_rank] += claim_correct
+                totals["claim_sink_rank_count"][sink_rank] += 1
+
         totals["item_count"] += 1
         totals["target_set_correct"] += int(correct_count == pair_count)
         totals["correct_count_histogram"][correct_count] += 1
@@ -164,11 +210,13 @@ def state_pair_diagnostics(
     final_state: torch.Tensor,
     batch: RoutingBatch,
     layout: ChannelLayout,
+    *,
+    claim_offset: int | None = 28,
 ) -> dict[str, Any]:
     if batch.pair_labels is None:
         raise ValueError("pair diagnostics require generated multi-pair metadata")
     totals = _empty_detail_totals(batch.pair_labels.shape[1])
-    add_state_pair_diagnostics(totals, final_state, batch, layout)
+    add_state_pair_diagnostics(totals, final_state, batch, layout, claim_offset=claim_offset)
     return _finalize_detail_totals(totals)
 
 
@@ -201,6 +249,7 @@ def diagnose_static_assignment(
     sink_assignment: str,
     seed: int,
     device: torch.device,
+    claim_offset: int | None = None,
 ) -> dict[str, Any]:
     model.eval()
     totals = _empty_detail_totals(pair_count)
@@ -221,7 +270,7 @@ def diagnose_static_assignment(
                 device=device,
             )
             rollout = model(batch, steps=rollout_steps)
-            add_state_pair_diagnostics(totals, rollout.final_state, batch, layout)
+            add_state_pair_diagnostics(totals, rollout.final_state, batch, layout, claim_offset=claim_offset)
     return _finalize_detail_totals(totals)
 
 
@@ -241,6 +290,7 @@ def diagnose_dynamic_assignment(
     sink_assignment: str,
     seed: int,
     device: torch.device,
+    claim_offset: int | None = None,
 ) -> dict[str, Any]:
     if batches <= 0:
         raise ValueError("batches must be positive")
@@ -278,7 +328,7 @@ def diagnose_dynamic_assignment(
                 device=device,
             )
             before_injury = model(batch, steps=pre_steps)
-            add_state_pair_diagnostics(pre_totals, before_injury.final_state, batch, layout)
+            add_state_pair_diagnostics(pre_totals, before_injury.final_state, batch, layout, claim_offset=claim_offset)
 
             injured = apply_random_injury(
                 batch,
@@ -306,7 +356,13 @@ def diagnose_dynamic_assignment(
                     )
                     current_state = recovered.final_state
                     previous_step = step
-                add_state_pair_diagnostics(recovery_totals[step], current_state, injured, layout)
+                add_state_pair_diagnostics(
+                    recovery_totals[step],
+                    current_state,
+                    injured,
+                    layout,
+                    claim_offset=claim_offset,
+                )
 
     finalized_recovery = {
         str(step): _finalize_detail_totals(totals) for step, totals in recovery_totals.items()
@@ -345,6 +401,15 @@ def summarize_v19_result(results: dict[str, dict[str, Any]]) -> dict[str, Any]:
             "dynamic_correct_count_distribution": final["correct_count_distribution"],
             "dynamic_source_rank_accuracy": final["source_rank_accuracy"],
             "dynamic_sink_rank_accuracy": final["sink_rank_accuracy"],
+            "static_claim_accuracy": result["static"].get("claim_accuracy", 0.0),
+            "dynamic_claim_available": bool(final.get("claim_available", False)),
+            "dynamic_claim_accuracy": final.get("claim_accuracy", 0.0),
+            "dynamic_claim_source_rank_accuracy": final.get("claim_source_rank_accuracy", {}),
+            "dynamic_claim_sink_rank_accuracy": final.get("claim_sink_rank_accuracy", {}),
+            "weakest_claim_source_rank": _weakest_rank(final.get("claim_source_rank_accuracy", {})),
+            "weakest_claim_sink_rank": _weakest_rank(final.get("claim_sink_rank_accuracy", {})),
+            "claim_source_rank_accuracy_spread": _rank_spread(final.get("claim_source_rank_accuracy", {})),
+            "claim_sink_rank_accuracy_spread": _rank_spread(final.get("claim_sink_rank_accuracy", {})),
             "weakest_source_rank": _weakest_rank(final["source_rank_accuracy"]),
             "weakest_sink_rank": _weakest_rank(final["sink_rank_accuracy"]),
             "source_rank_accuracy_spread": _rank_spread(final["source_rank_accuracy"]),
@@ -435,6 +500,8 @@ def main() -> None:
     pre_steps = args.pre_steps if args.pre_steps is not None else max(1, rollout_steps // 2)
     post_steps = max(1, rollout_steps - pre_steps)
     recovery_steps = _recovery_steps(args.recovery_checkpoints, post_steps)
+    model_claim_start = getattr(model.cell_update, "claim_start", None)
+    claim_offset = int(model_claim_start) - layout.hidden_start if model_claim_start is not None else None
 
     results: dict[str, dict[str, Any]] = {}
     for assignment_index, assignment in enumerate(assignments):
@@ -452,6 +519,7 @@ def main() -> None:
             sink_assignment=assignment,
             seed=seed,
             device=device,
+            claim_offset=claim_offset,
         )
         dynamic = diagnose_dynamic_assignment(
             model,
@@ -468,6 +536,7 @@ def main() -> None:
             sink_assignment=assignment,
             seed=seed + 10_000,
             device=device,
+            claim_offset=claim_offset,
         )
         results[assignment] = {
             "static": static,

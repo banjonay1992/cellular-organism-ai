@@ -23,6 +23,7 @@ SUPPORTED_UPDATE_RULES = {
     "rank_slot_rule_cued",
     "rank_slot_repair_rule_cued",
     "rank_slot_claim_rule_cued",
+    "rank_slot_claim_residual_rule_cued",
     "relative_rank_rule_cued",
 }
 

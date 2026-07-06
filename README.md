@@ -157,6 +157,7 @@ These are run artifacts, not hardcoded scores:
 - Multi-pair v0.21 consistency objective: added a worst-sink consistency loss that penalizes each generated item's weakest correct-vs-wrong sink margin, targeting the common "3 of 4 sinks right" failure directly. The objective is tested and trainable through `--consistency-weight` / `--consistency-margin`, but it did not solve four-pair reverse by itself. A mixed continuation from v0.20 improved cycle dynamic `target_set_accuracy` to `0.828125`, but reverse dynamic stayed at `0.3828125` versus the v0.20 same-seed `0.39453125`, with `44.921875%` of items still landing at exactly 3 correct sinks. Reverse-only and static-reverse continuations also failed the v0.18 gate; the static-reverse branch ended at reverse static/dynamic `0.37109375 / 0.35546875`, while cycle stayed `0.71484375 / 0.71875`. The result is useful: local margin pressure can sharpen an easier rule, but the reverse wall is a coordinated rank-binding error, not just weak sink logits.
 - Multi-pair v0.22 repair-bus experiment: added `rank_slot_repair_rule_cued`, which keeps the rank-slot organ but reserves four hidden channels for a recurrent sink/source repair loop. Sinks broadcast their current A/B vote leftward, sources answer rightward with label repair signals, and a new repair readout can be trained either with the whole organism or alone through `--train-repair-only`. The mechanism is alive and tested, but this version does not solve four-pair reverse. Mixed repair training reached reverse static/dynamic `0.3984375 / 0.37109375` and cycle dynamic `0.79296875`; reverse-only repair reached reverse dynamic `0.3671875`; repair-only training preserved the base more cleanly but reached only `0.359375`. The lesson is sharper: a feedback bus is not enough if its messages are just label votes. The next organ probably needs explicit permutation/assignment state, where sinks negotiate which source rank they claim, not only which label they currently believe.
 - Multi-pair v0.23 rank-claim organ: added `rank_slot_claim_rule_cued`, with 8 source-rank label channels, 4 sink claim channels, claim-only warm starts, and a generated claim supervision loss. The internal claim state does learn above chance: static clean claim pretrain ended at train claim accuracy `0.4375`, and dynamic continuation peaked at `0.53125` on a logged minibatch. But the current output path does not generalize. Held-out v0.19 diagnostics for `organism-v23-claim-dynamic.pt` reached reverse static/dynamic `0.20703125 / 0.26171875`, cycle dynamic `0.05859375`, and aligned dynamic `0.07421875`, worse than v0.20. Conclusion: explicit claim state is learnable, but claim-to-output takeover is wrong; the next attempt should verify held-out claim accuracy first, then distill claims into output with a safer residual gate.
+- Multi-pair v0.24 safe residual scaffold: added held-out claim diagnostics, `rank_slot_claim_residual_rule_cued`, claim-gate-only and claim-state-only training modes, and a hidden-expansion warm start that grows the 32-hidden v0.20 body into 44 hidden channels. This found the real v0.23 hazard: claim channels at hidden offsets 20-31 collided with tissue the old organism already used. With claims moved into new channels 32-43 and the residual gate closed, v0.24 preserves the v0.20 baseline on the same v0.19 matrix: reverse static/dynamic `0.390625 / 0.39453125`, cycle dynamic `0.75390625`. Claim-state-only training keeps that output behavior intact and lifts reverse dynamic claim accuracy from random `0.25` to `0.369140625`, but the inner claim ranks are still weak (`0.140625 / 0.0625`). Result: safe organ transplantation works; the next problem is a better claim coordinate/curriculum, not output gating.
 
 Example 3-pair damaged training path:
 
@@ -705,6 +706,78 @@ PYTHONPATH=src python3 -m organism_v01.benchmark_v19 \
   --report outputs/reports/benchmark-v23-claim-dynamic-diagnostics.json
 ```
 
+Train and probe the v0.24 safe residual scaffold:
+
+```bash
+PYTHONPATH=src python3 -m organism_v01.train \
+  --task multi \
+  --curriculum none \
+  --steps 1 \
+  --batch-size 8 \
+  --grid-size 14 \
+  --rollout-steps 112 \
+  --hidden-channels 44 \
+  --rule-channels 3 \
+  --cell-hidden 64 \
+  --update-rule rank_slot_claim_residual_rule_cued \
+  --train-claim-gate-only \
+  --damage-prob 0.10 \
+  --dynamic-injury-prob 0.10 \
+  --dynamic-injury-pre-steps 56 \
+  --pair-count 4 \
+  --min-pair-spacing 1 \
+  --sink-assignment reverse \
+  --field-weight 0.5 \
+  --localization-weight 1.0 \
+  --lr 0.0 \
+  --seed 1036 \
+  --init-model outputs/models/organism-v20-reverse-polish.pt \
+  --save-model outputs/models/organism-v24-claim-residual-expanded-closed.pt \
+  --report outputs/reports/train-v24-claim-residual-expanded-closed.json
+
+PYTHONPATH=src python3 -m organism_v01.train \
+  --task multi \
+  --curriculum none \
+  --steps 420 \
+  --batch-size 8 \
+  --grid-size 14 \
+  --rollout-steps 112 \
+  --hidden-channels 44 \
+  --rule-channels 3 \
+  --cell-hidden 64 \
+  --update-rule rank_slot_claim_residual_rule_cued \
+  --train-claim-state-only \
+  --damage-prob 0.10 \
+  --dynamic-injury-prob 0.10 \
+  --dynamic-injury-pre-steps 56 \
+  --pair-count 4 \
+  --min-pair-spacing 1 \
+  --sink-assignment reverse \
+  --field-weight 0.5 \
+  --localization-weight 1.0 \
+  --slot-weight 0.0 \
+  --claim-weight 5.0 \
+  --lr 0.004 \
+  --seed 1037 \
+  --init-model outputs/models/organism-v24-claim-residual-expanded-closed.pt \
+  --save-model outputs/models/organism-v24-claim-state.pt \
+  --report outputs/reports/train-v24-claim-state.json
+
+PYTHONPATH=src python3 -m organism_v01.benchmark_v19 \
+  --model outputs/models/organism-v24-claim-state.pt \
+  --batches 16 \
+  --batch-size 16 \
+  --grid-size 14 \
+  --rollout-steps 112 \
+  --pre-steps 56 \
+  --damage-prob 0.10 \
+  --injury-prob 0.10 \
+  --pair-count 4 \
+  --assignments aligned,cycle,reverse \
+  --seed 112100 \
+  --report outputs/reports/benchmark-v24-claim-state-diagnostics.json
+```
+
 Audit whether two generated assignment rules are input-identical but target-conflicting:
 
 ```bash
@@ -901,3 +974,12 @@ held-out four-pair behavior. The next version should separate three questions:
 whether held-out claims are right, whether claims survive injury, and whether a
 small residual output gate can use them without erasing the already useful v0.20
 behavior.
+
+In v0.24, the residual organ is separated from the old tissue instead of sharing
+hidden channels. The loader can transplant a 32-hidden checkpoint into a
+44-hidden body by copying old env/hidden/output channel weights into their new
+positions and leaving the added claim tissue quiet. That makes a closed claim
+gate genuinely safe: output behavior matches v0.20 while the new claim channels
+can be measured and trained. The remaining failure is narrower and cleaner:
+claim-state training helps the outer reverse ranks, but the two inner claim
+ranks are still not represented well enough to deserve control over answers.
