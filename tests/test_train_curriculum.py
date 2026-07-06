@@ -54,10 +54,22 @@ class TrainCurriculumTests(unittest.TestCase):
 
     def test_parser_exposes_claim_training_args(self) -> None:
         args = build_parser().parse_args(
-            ["--claim-weight", "0.4", "--train-claim-only", "--train-claim-gate-only", "--train-claim-state-only"]
+            [
+                "--claim-weight",
+                "0.4",
+                "--claim-coordinate-weight",
+                "0.7",
+                "--claim-inner-weight",
+                "1.3",
+                "--train-claim-only",
+                "--train-claim-gate-only",
+                "--train-claim-state-only",
+            ]
         )
 
         self.assertEqual(args.claim_weight, 0.4)
+        self.assertEqual(args.claim_coordinate_weight, 0.7)
+        self.assertEqual(args.claim_inner_weight, 1.3)
         self.assertTrue(args.train_claim_only)
         self.assertTrue(args.train_claim_gate_only)
         self.assertTrue(args.train_claim_state_only)
@@ -81,6 +93,11 @@ class TrainCurriculumTests(unittest.TestCase):
         args = build_parser().parse_args(["--update-rule", "rank_slot_claim_residual_rule_cued"])
 
         self.assertEqual(args.update_rule, "rank_slot_claim_residual_rule_cued")
+
+    def test_parser_accepts_rank_slot_claim_factor_update_rule(self) -> None:
+        args = build_parser().parse_args(["--update-rule", "rank_slot_claim_factor_rule_cued"])
+
+        self.assertEqual(args.update_rule, "rank_slot_claim_factor_rule_cued")
 
     def test_scale_training_params_cycle_in_two_step_blocks(self) -> None:
         args = build_parser().parse_args(
@@ -314,6 +331,38 @@ class TrainCurriculumTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             curriculum_batch_params(args, 1)
 
+    def test_claim_coordinate_curriculum_keeps_four_pairs_and_ramps_rules(self) -> None:
+        args = argparse.Namespace(
+            task="multi",
+            curriculum="claim_coordinate",
+            steps=100,
+            pair_count=4,
+            damage_prob=0.10,
+            coordinate_fields=True,
+            min_pair_spacing=1,
+            sink_assignment="reverse",
+            memory_input_steps=4,
+            rule_channels=3,
+        )
+
+        aligned = curriculum_batch_params(args, 1)
+        reverse_clean = curriculum_batch_params(args, 25)
+        cycle_clean = curriculum_batch_params(args, 55)
+        reverse_damaged = curriculum_batch_params(args, 95)
+        cycle_damaged = curriculum_batch_params(args, 96)
+
+        self.assertEqual((aligned["pair_count"], aligned["sink_assignment"], aligned["damage_prob"]), (4, "aligned", 0.0))
+        self.assertEqual((reverse_clean["pair_count"], reverse_clean["sink_assignment"]), (4, "reverse"))
+        self.assertEqual(reverse_clean["damage_prob"], 0.0)
+        self.assertEqual((cycle_clean["pair_count"], cycle_clean["sink_assignment"]), (4, "cycle"))
+        self.assertEqual(cycle_clean["damage_prob"], 0.0)
+        self.assertEqual((reverse_damaged["sink_assignment"], reverse_damaged["damage_prob"]), ("reverse", 0.10))
+        self.assertEqual((cycle_damaged["sink_assignment"], cycle_damaged["damage_prob"]), ("cycle", 0.10))
+
+        args.pair_count = 3
+        with self.assertRaises(ValueError):
+            curriculum_batch_params(args, 1)
+
     def test_load_initial_model_restores_weights(self) -> None:
         layout = ChannelLayout(hidden_channels=4)
         source = CellularOrganism(layout=layout, cell_hidden=16)
@@ -513,6 +562,49 @@ class TrainCurriculumTests(unittest.TestCase):
         self.assertTrue(torch.equal(source.cell_update.claim_match[-1].bias, target.cell_update.claim_match[-1].bias))
         self.assertAlmostEqual(float(target.cell_update.delta.bias[target_layout.output_start].detach()), 4.0)
         self.assertTrue(hasattr(target.cell_update, "claim_gate"))
+
+    def test_load_initial_model_allows_claim_factor_warm_start(self) -> None:
+        layout = ChannelLayout(hidden_channels=44, rule_channels=3)
+        source = CellularOrganism(
+            layout=layout,
+            cell_hidden=16,
+            update_rule="rank_slot_claim_residual_rule_cued",
+        )
+        target = CellularOrganism(
+            layout=layout,
+            cell_hidden=16,
+            update_rule="rank_slot_claim_factor_rule_cued",
+        )
+
+        with torch.no_grad():
+            source.cell_update.claim_gate[-1].bias.add_(2.0)
+            target.cell_update.claim_gate[-1].bias.zero_()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "checkpoint.pt"
+            torch.save(
+                {
+                    "model_state_dict": source.state_dict(),
+                    "layout": {"hidden_channels": 44, "route_channels": 0, "rule_channels": 3},
+                    "args": {"cell_hidden": 16, "update_rule": "rank_slot_claim_residual_rule_cued"},
+                },
+                path,
+            )
+            load_initial_model(
+                target,
+                init_model=str(path),
+                device=torch.device("cpu"),
+                expected_hidden_channels=44,
+                expected_route_channels=0,
+                expected_rule_channels=3,
+                expected_cell_hidden=16,
+                expected_update_rule="rank_slot_claim_factor_rule_cued",
+                expected_message_slots=8,
+                expected_tag_slots=4,
+            )
+
+        self.assertTrue(torch.equal(source.cell_update.claim_gate[-1].bias, target.cell_update.claim_gate[-1].bias))
+        self.assertTrue(hasattr(target.cell_update.claim_seed, "net"))
 
     def test_freeze_non_repair_parameters_leaves_only_repair_trainable(self) -> None:
         layout = ChannelLayout(hidden_channels=32, rule_channels=3)

@@ -9,7 +9,17 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from organism_v01.channels import ChannelLayout
-from organism_v01.metrics import compute_loss, rank_claim_supervision_loss, rank_slot_accuracy, rank_slot_routed_accuracy
+from organism_v01.cell import FactorizedClaimSeed
+from organism_v01.metrics import (
+    compute_loss,
+    rank_claim_coordinate_loss,
+    rank_claim_coordinate_metrics,
+    rank_claim_inner_metrics,
+    rank_claim_inner_supervision_loss,
+    rank_claim_supervision_loss,
+    rank_slot_accuracy,
+    rank_slot_routed_accuracy,
+)
 from organism_v01.organism import CellularOrganism
 from organism_v01.tasks import generate_memory_batch, generate_multi_pair_batch, generate_routing_batch
 
@@ -477,6 +487,73 @@ class OrganismTests(unittest.TestCase):
         target = cell_update._claim_target_from_seed(claim_state, claim_seed, sink_marker)
 
         self.assertTrue(torch.equal(target[:, :, 1, 1], claim_seed[:, :, 1, 1]))
+
+    def test_rank_claim_coordinate_loss_separates_inner_rank_bits(self) -> None:
+        layout = ChannelLayout(hidden_channels=44, rule_channels=3)
+        batch = generate_multi_pair_batch(
+            batch_size=1,
+            grid_size=12,
+            layout=layout,
+            pair_count=4,
+            sink_assignment="reverse",
+            damage_prob=0.0,
+            seed=129,
+        )
+        correct_state = batch.initial.clone()
+        swapped_inner_state = batch.initial.clone()
+        claim_start = layout.hidden_start + 32
+        for pair_index in range(4):
+            row, col = [int(value) for value in batch.pair_sink_rc[0, pair_index]]
+            correct_state[0, claim_start + pair_index, row, col] = 6.0
+            swapped_rank = {1: 2, 2: 1}.get(pair_index, pair_index)
+            swapped_inner_state[0, claim_start + swapped_rank, row, col] = 6.0
+
+        correct_loss = rank_claim_coordinate_loss(correct_state, batch, layout, claim_offset=32)
+        swapped_loss = rank_claim_coordinate_loss(swapped_inner_state, batch, layout, claim_offset=32)
+        correct_inner_loss = rank_claim_inner_supervision_loss(correct_state, batch, layout, claim_offset=32)
+        swapped_inner_loss = rank_claim_inner_supervision_loss(swapped_inner_state, batch, layout, claim_offset=32)
+        correct_metrics = rank_claim_coordinate_metrics(correct_state, batch, layout, claim_offset=32)
+        swapped_metrics = rank_claim_coordinate_metrics(swapped_inner_state, batch, layout, claim_offset=32)
+        correct_inner_metrics = rank_claim_inner_metrics(correct_state, batch, layout, claim_offset=32)
+        swapped_inner_metrics = rank_claim_inner_metrics(swapped_inner_state, batch, layout, claim_offset=32)
+
+        self.assertLess(float(correct_loss), float(swapped_loss))
+        self.assertLess(float(correct_inner_loss), float(swapped_inner_loss))
+        self.assertEqual(correct_metrics["claim_inner_outer_accuracy"], 1.0)
+        self.assertEqual(correct_metrics["claim_half_accuracy"], 1.0)
+        self.assertEqual(correct_metrics["claim_coordinate_accuracy"], 1.0)
+        self.assertEqual(swapped_metrics["claim_inner_outer_accuracy"], 1.0)
+        self.assertEqual(swapped_metrics["claim_half_accuracy"], 0.5)
+        self.assertEqual(swapped_metrics["claim_coordinate_accuracy"], 0.5)
+        self.assertEqual(correct_inner_metrics["claim_inner_exact_accuracy"], 1.0)
+        self.assertEqual(correct_inner_metrics["claim_inner_split_accuracy"], 1.0)
+        self.assertEqual(swapped_inner_metrics["claim_inner_exact_accuracy"], 0.0)
+        self.assertEqual(swapped_inner_metrics["claim_inner_split_accuracy"], 0.0)
+
+    def test_factorized_claim_seed_composes_binary_coordinates_into_ranks(self) -> None:
+        factors = torch.zeros(1, 4, 1, 4)
+        factors[0, 0, 0, 0] = 3.0
+        factors[0, 2, 0, 0] = 2.0
+        factors[0, 1, 0, 1] = 3.0
+        factors[0, 2, 0, 1] = 2.0
+        factors[0, 1, 0, 2] = 3.0
+        factors[0, 3, 0, 2] = 2.0
+        factors[0, 0, 0, 3] = 3.0
+        factors[0, 3, 0, 3] = 2.0
+
+        composed = FactorizedClaimSeed.compose(factors)
+
+        self.assertEqual(composed.argmax(dim=1).view(-1).tolist(), [0, 1, 2, 3])
+
+    def test_rank_slot_claim_factor_rule_cued_builds_factorized_seed(self) -> None:
+        layout = ChannelLayout(hidden_channels=44, rule_channels=3)
+        model = CellularOrganism(
+            layout=layout,
+            cell_hidden=16,
+            update_rule="rank_slot_claim_factor_rule_cued",
+        )
+
+        self.assertIsInstance(model.cell_update.claim_seed, FactorizedClaimSeed)
 
     def test_rank_slot_claim_residual_rule_cued_requires_extra_claim_channels(self) -> None:
         layout = ChannelLayout(hidden_channels=43, rule_channels=3)

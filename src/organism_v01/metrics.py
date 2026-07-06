@@ -190,6 +190,195 @@ def rank_claim_accuracy(
     return float(torch.stack(correct).float().mean().item())
 
 
+def _rank_claim_coordinate_logits(logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    inner_outer_logits = torch.stack(
+        [
+            torch.logsumexp(logits[[0, 3]], dim=0),
+            torch.logsumexp(logits[[1, 2]], dim=0),
+        ]
+    )
+    half_logits = torch.stack(
+        [
+            torch.logsumexp(logits[[0, 1]], dim=0),
+            torch.logsumexp(logits[[2, 3]], dim=0),
+        ]
+    )
+    return inner_outer_logits, half_logits
+
+
+def rank_claim_coordinate_loss(
+    final_state: torch.Tensor,
+    batch: RoutingBatch,
+    layout: ChannelLayout,
+    *,
+    claim_offset: int = 28,
+    claim_channels: int = 4,
+) -> torch.Tensor:
+    """Teach four-rank claims as two generated binary coordinates.
+
+    The full claim loss asks for source rank 0/1/2/3 directly. This auxiliary
+    loss decomposes that target into inner-vs-outer and upper-vs-lower source
+    rank bits, which gives the two middle ranks a simpler supervised shape
+    before any claim output gate is opened.
+    """
+
+    if batch.pair_sink_rc is None:
+        return final_state.sum() * 0.0
+    pair_count = batch.pair_sink_rc.shape[1]
+    if pair_count != 4 or claim_channels != 4:
+        return final_state.sum() * 0.0
+
+    claim_start = layout.hidden_start + claim_offset
+    if layout.hidden_channels < claim_offset + claim_channels:
+        return final_state.sum() * 0.0
+
+    claim_logits = final_state[:, claim_start : claim_start + claim_channels]
+    terms: list[torch.Tensor] = []
+    for item in range(final_state.shape[0]):
+        for pair_index in range(pair_count):
+            row, col = [int(value) for value in batch.pair_sink_rc[item, pair_index]]
+            logits = claim_logits[item, :, row, col]
+            inner_outer_logits, half_logits = _rank_claim_coordinate_logits(logits)
+            inner_outer_target = torch.tensor([1 if pair_index in {1, 2} else 0], device=final_state.device)
+            half_target = torch.tensor([1 if pair_index >= 2 else 0], device=final_state.device)
+            terms.append(F.cross_entropy(inner_outer_logits.view(1, -1), inner_outer_target))
+            terms.append(F.cross_entropy(half_logits.view(1, -1), half_target))
+
+    if not terms:
+        return final_state.sum() * 0.0
+    return torch.stack(terms).mean()
+
+
+def rank_claim_coordinate_metrics(
+    final_state: torch.Tensor,
+    batch: RoutingBatch,
+    layout: ChannelLayout,
+    *,
+    claim_offset: int = 28,
+    claim_channels: int = 4,
+) -> dict[str, float]:
+    """Accuracy for the binary claim coordinates used by v0.25 training."""
+
+    empty = {
+        "claim_inner_outer_accuracy": 0.0,
+        "claim_half_accuracy": 0.0,
+        "claim_coordinate_accuracy": 0.0,
+    }
+    if batch.pair_sink_rc is None:
+        return empty
+    pair_count = batch.pair_sink_rc.shape[1]
+    if pair_count != 4 or claim_channels != 4:
+        return empty
+
+    claim_start = layout.hidden_start + claim_offset
+    if layout.hidden_channels < claim_offset + claim_channels:
+        return empty
+
+    claim_logits = final_state[:, claim_start : claim_start + claim_channels]
+    inner_outer_correct: list[torch.Tensor] = []
+    half_correct: list[torch.Tensor] = []
+    joint_correct: list[torch.Tensor] = []
+    for item in range(final_state.shape[0]):
+        for pair_index in range(pair_count):
+            row, col = [int(value) for value in batch.pair_sink_rc[item, pair_index]]
+            logits = claim_logits[item, :, row, col]
+            inner_outer_logits, half_logits = _rank_claim_coordinate_logits(logits)
+            inner_outer_target = torch.tensor(1 if pair_index in {1, 2} else 0, device=final_state.device)
+            half_target = torch.tensor(1 if pair_index >= 2 else 0, device=final_state.device)
+            inner_outer_ok = inner_outer_logits.argmax(dim=0) == inner_outer_target
+            half_ok = half_logits.argmax(dim=0) == half_target
+            inner_outer_correct.append(inner_outer_ok)
+            half_correct.append(half_ok)
+            joint_correct.append(inner_outer_ok & half_ok)
+
+    if not joint_correct:
+        return empty
+    return {
+        "claim_inner_outer_accuracy": float(torch.stack(inner_outer_correct).float().mean().item()),
+        "claim_half_accuracy": float(torch.stack(half_correct).float().mean().item()),
+        "claim_coordinate_accuracy": float(torch.stack(joint_correct).float().mean().item()),
+    }
+
+
+def rank_claim_inner_supervision_loss(
+    final_state: torch.Tensor,
+    batch: RoutingBatch,
+    layout: ChannelLayout,
+    *,
+    claim_offset: int = 28,
+    claim_channels: int = 4,
+) -> torch.Tensor:
+    """Extra generated supervision for the two middle four-pair claim ranks."""
+
+    if batch.pair_sink_rc is None:
+        return final_state.sum() * 0.0
+    pair_count = batch.pair_sink_rc.shape[1]
+    if pair_count != 4 or claim_channels != 4:
+        return final_state.sum() * 0.0
+
+    claim_start = layout.hidden_start + claim_offset
+    if layout.hidden_channels < claim_offset + claim_channels:
+        return final_state.sum() * 0.0
+
+    claim_logits = final_state[:, claim_start : claim_start + claim_channels]
+    terms: list[torch.Tensor] = []
+    for item in range(final_state.shape[0]):
+        for pair_index in (1, 2):
+            row, col = [int(value) for value in batch.pair_sink_rc[item, pair_index]]
+            logits = claim_logits[item, :, row, col]
+            full_target = torch.tensor([pair_index], device=final_state.device)
+            inner_target = torch.tensor([pair_index - 1], device=final_state.device)
+            terms.append(F.cross_entropy(logits.view(1, -1), full_target))
+            terms.append(F.cross_entropy(logits[1:3].view(1, -1), inner_target))
+
+    if not terms:
+        return final_state.sum() * 0.0
+    return torch.stack(terms).mean()
+
+
+def rank_claim_inner_metrics(
+    final_state: torch.Tensor,
+    batch: RoutingBatch,
+    layout: ChannelLayout,
+    *,
+    claim_offset: int = 28,
+    claim_channels: int = 4,
+) -> dict[str, float]:
+    """Exact and inner-only accuracy for the two middle claim ranks."""
+
+    empty = {
+        "claim_inner_exact_accuracy": 0.0,
+        "claim_inner_split_accuracy": 0.0,
+    }
+    if batch.pair_sink_rc is None:
+        return empty
+    pair_count = batch.pair_sink_rc.shape[1]
+    if pair_count != 4 or claim_channels != 4:
+        return empty
+
+    claim_start = layout.hidden_start + claim_offset
+    if layout.hidden_channels < claim_offset + claim_channels:
+        return empty
+
+    claim_logits = final_state[:, claim_start : claim_start + claim_channels]
+    exact_correct: list[torch.Tensor] = []
+    split_correct: list[torch.Tensor] = []
+    for item in range(final_state.shape[0]):
+        for pair_index in (1, 2):
+            row, col = [int(value) for value in batch.pair_sink_rc[item, pair_index]]
+            logits = claim_logits[item, :, row, col]
+            exact_correct.append(logits.argmax(dim=0) == pair_index)
+            inner_target = torch.tensor(pair_index - 1, device=final_state.device)
+            split_correct.append(logits[1:3].argmax(dim=0) == inner_target)
+
+    if not exact_correct:
+        return empty
+    return {
+        "claim_inner_exact_accuracy": float(torch.stack(exact_correct).float().mean().item()),
+        "claim_inner_split_accuracy": float(torch.stack(split_correct).float().mean().item()),
+    }
+
+
 def output_localization(
     final_state: torch.Tensor,
     batch: RoutingBatch,

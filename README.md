@@ -158,6 +158,8 @@ These are run artifacts, not hardcoded scores:
 - Multi-pair v0.22 repair-bus experiment: added `rank_slot_repair_rule_cued`, which keeps the rank-slot organ but reserves four hidden channels for a recurrent sink/source repair loop. Sinks broadcast their current A/B vote leftward, sources answer rightward with label repair signals, and a new repair readout can be trained either with the whole organism or alone through `--train-repair-only`. The mechanism is alive and tested, but this version does not solve four-pair reverse. Mixed repair training reached reverse static/dynamic `0.3984375 / 0.37109375` and cycle dynamic `0.79296875`; reverse-only repair reached reverse dynamic `0.3671875`; repair-only training preserved the base more cleanly but reached only `0.359375`. The lesson is sharper: a feedback bus is not enough if its messages are just label votes. The next organ probably needs explicit permutation/assignment state, where sinks negotiate which source rank they claim, not only which label they currently believe.
 - Multi-pair v0.23 rank-claim organ: added `rank_slot_claim_rule_cued`, with 8 source-rank label channels, 4 sink claim channels, claim-only warm starts, and a generated claim supervision loss. The internal claim state does learn above chance: static clean claim pretrain ended at train claim accuracy `0.4375`, and dynamic continuation peaked at `0.53125` on a logged minibatch. But the current output path does not generalize. Held-out v0.19 diagnostics for `organism-v23-claim-dynamic.pt` reached reverse static/dynamic `0.20703125 / 0.26171875`, cycle dynamic `0.05859375`, and aligned dynamic `0.07421875`, worse than v0.20. Conclusion: explicit claim state is learnable, but claim-to-output takeover is wrong; the next attempt should verify held-out claim accuracy first, then distill claims into output with a safer residual gate.
 - Multi-pair v0.24 safe residual scaffold: added held-out claim diagnostics, `rank_slot_claim_residual_rule_cued`, claim-gate-only and claim-state-only training modes, and a hidden-expansion warm start that grows the 32-hidden v0.20 body into 44 hidden channels. This found the real v0.23 hazard: claim channels at hidden offsets 20-31 collided with tissue the old organism already used. With claims moved into new channels 32-43 and the residual gate closed, v0.24 preserves the v0.20 baseline on the same v0.19 matrix: reverse static/dynamic `0.390625 / 0.39453125`, cycle dynamic `0.75390625`. Claim-state-only training keeps that output behavior intact and lifts reverse dynamic claim accuracy from random `0.25` to `0.369140625`, but the inner claim ranks are still weak (`0.140625 / 0.0625`). Result: safe organ transplantation works; the next problem is a better claim coordinate/curriculum, not output gating.
+- Multi-pair v0.25 claim-coordinate curriculum: added generated binary claim-coordinate supervision (`inner/outer` and `upper/lower`), a `claim_coordinate` curriculum, inner-rank-only claim loss, and logs for coordinate/inner accuracy. The answer body stayed intact, but the claim organ exposed a clearer tradeoff. Coordinate-heavy training improved reverse dynamic claim accuracy to `0.4365234375`, but it solved only outer ranks (`0.74609375 / 0.0 / 0.0 / 1.0`). Inner-heavy training flipped the failure: reverse dynamic inner claims rose to `0.55078125 / 0.40234375`, but outer ranks fell to `0.0 / 0.0`, with total claim accuracy `0.23828125`. This is progress as diagnosis, not as a solved organism.
+- Multi-pair v0.26 factorized claim seed: added `rank_slot_claim_factor_rule_cued`, where two learned binary coordinate heads compose into four exact source-rank claim logits. This is more biology-ish than a flat four-way claim head, and it is tested/warm-startable, but it still did not solve the held-out four-pair wall. On the same v0.19 matrix, reverse dynamic output remained preserved at `0.39453125`, while reverse dynamic claim accuracy stayed near random at `0.248046875`; the two inner source ranks were learned (`0.4609375 / 0.53125`) and both outer ranks collapsed to `0.0`. Conclusion: loss/claim-head shaping can move which ranks the organism claims, but the current upstream sink-rank signal cannot bind all four ranks at once. The next frontier is diagnosing and improving the rank signal itself before opening the claim gate.
 
 Example 3-pair damaged training path:
 
@@ -778,6 +780,75 @@ PYTHONPATH=src python3 -m organism_v01.benchmark_v19 \
   --report outputs/reports/benchmark-v24-claim-state-diagnostics.json
 ```
 
+Train and probe the v0.25/v0.26 claim-coordinate variants:
+
+```bash
+PYTHONPATH=src python3 -m organism_v01.train \
+  --task multi \
+  --curriculum claim_coordinate \
+  --steps 600 \
+  --batch-size 8 \
+  --grid-size 14 \
+  --rollout-steps 112 \
+  --hidden-channels 44 \
+  --rule-channels 3 \
+  --cell-hidden 64 \
+  --update-rule rank_slot_claim_residual_rule_cued \
+  --train-claim-state-only \
+  --damage-prob 0.10 \
+  --dynamic-injury-prob 0.10 \
+  --dynamic-injury-pre-steps 56 \
+  --pair-count 4 \
+  --sink-assignment reverse \
+  --claim-weight 1.0 \
+  --claim-coordinate-weight 5.0 \
+  --lr 0.003 \
+  --seed 1038 \
+  --init-model outputs/models/organism-v24-claim-state.pt \
+  --save-model outputs/models/organism-v25-claim-coordinate.pt \
+  --report outputs/reports/train-v25-claim-coordinate.json
+
+PYTHONPATH=src python3 -m organism_v01.train \
+  --task multi \
+  --curriculum claim_coordinate \
+  --steps 600 \
+  --batch-size 8 \
+  --grid-size 14 \
+  --rollout-steps 112 \
+  --hidden-channels 44 \
+  --rule-channels 3 \
+  --cell-hidden 64 \
+  --update-rule rank_slot_claim_factor_rule_cued \
+  --train-claim-state-only \
+  --damage-prob 0.10 \
+  --dynamic-injury-prob 0.10 \
+  --dynamic-injury-pre-steps 56 \
+  --pair-count 4 \
+  --sink-assignment reverse \
+  --claim-weight 1.0 \
+  --claim-coordinate-weight 2.0 \
+  --claim-inner-weight 1.0 \
+  --lr 0.003 \
+  --seed 1040 \
+  --init-model outputs/models/organism-v24-claim-residual-expanded-closed.pt \
+  --save-model outputs/models/organism-v26-claim-factor.pt \
+  --report outputs/reports/train-v26-claim-factor.json
+
+PYTHONPATH=src python3 -m organism_v01.benchmark_v19 \
+  --model outputs/models/organism-v26-claim-factor.pt \
+  --batches 16 \
+  --batch-size 16 \
+  --grid-size 14 \
+  --rollout-steps 112 \
+  --pre-steps 56 \
+  --damage-prob 0.10 \
+  --injury-prob 0.10 \
+  --pair-count 4 \
+  --assignments aligned,cycle,reverse \
+  --seed 112100 \
+  --report outputs/reports/benchmark-v26-claim-factor-diagnostics.json
+```
+
 Audit whether two generated assignment rules are input-identical but target-conflicting:
 
 ```bash
@@ -983,3 +1054,12 @@ gate genuinely safe: output behavior matches v0.20 while the new claim channels
 can be measured and trained. The remaining failure is narrower and cleaner:
 claim-state training helps the outer reverse ranks, but the two inner claim
 ranks are still not represented well enough to deserve control over answers.
+
+In v0.25/v0.26, the claim organ gained explicit generated coordinate losses and
+then a factorized two-bit claim seed. These additions made the failure more
+legible: the same body can learn outer claims or inner claims, and the factorized
+seed can represent the inner split, but the system still does not maintain a
+balanced four-rank claim assignment under reverse/cycle injury. That points away
+from the output gate and toward the upstream rank representation: before claims
+can safely drive answers, the organism needs a stronger local signal for all four
+sink/source ranks, not just a better loss on the final claim channels.

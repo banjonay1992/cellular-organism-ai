@@ -1334,6 +1334,73 @@ class RankSlotClaimResidualRuleCuedCellUpdate(RankSlotClaimRuleCuedCellUpdate):
         return torch.where(sink_marker.bool(), claim_seed.clamp(-4.0, 4.0), carried)
 
 
+class FactorizedClaimSeed(nn.Module):
+    """Compose four source-rank claim logits from two binary coordinate heads."""
+
+    def __init__(self, input_channels: int, hidden: int = 16) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(input_channels, hidden, kernel_size=1),
+            nn.SiLU(),
+            nn.Conv2d(hidden, 4, kernel_size=1),
+        )
+        final = self.net[-1]
+        if isinstance(final, nn.Conv2d):
+            nn.init.normal_(final.weight, mean=0.0, std=5e-3)
+            nn.init.zeros_(final.bias)
+
+    @staticmethod
+    def compose(factors: torch.Tensor) -> torch.Tensor:
+        outer = factors[:, 0:1]
+        inner = factors[:, 1:2]
+        upper = factors[:, 2:3]
+        lower = factors[:, 3:4]
+        return torch.cat(
+            [
+                outer + upper,
+                inner + upper,
+                inner + lower,
+                outer + lower,
+            ],
+            dim=1,
+        )
+
+    def forward(self, state: torch.Tensor) -> torch.Tensor:
+        return self.compose(self.net(state))
+
+
+class RankSlotClaimFactorRuleCuedCellUpdate(RankSlotClaimResidualRuleCuedCellUpdate):
+    """Residual rank-claim organ with a factorized source-rank claim seed."""
+
+    def __init__(
+        self,
+        channels: int,
+        *,
+        hidden_start: int,
+        hidden_channels: int,
+        source_a: int,
+        source_b: int,
+        sink: int,
+        output_start: int,
+        rule_start: int,
+        rule_channels: int,
+        hidden: int = 64,
+    ) -> None:
+        super().__init__(
+            channels,
+            hidden_start=hidden_start,
+            hidden_channels=hidden_channels,
+            source_a=source_a,
+            source_b=source_b,
+            sink=sink,
+            output_start=output_start,
+            rule_start=rule_start,
+            rule_channels=rule_channels,
+            hidden=hidden,
+        )
+        self.claim_seed = FactorizedClaimSeed(self.claim_channels + rule_channels)
+
+
 class RelativeRankRuleCuedCellUpdate(nn.Module):
     """Rule-cued readout with scalable relative-rank label moments."""
 
@@ -1583,5 +1650,6 @@ UPDATE_RULES = (
     "rank_slot_repair_rule_cued",
     "rank_slot_claim_rule_cued",
     "rank_slot_claim_residual_rule_cued",
+    "rank_slot_claim_factor_rule_cued",
     "relative_rank_rule_cued",
 )

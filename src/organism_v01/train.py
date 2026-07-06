@@ -17,6 +17,10 @@ from organism_v01.metrics import (
     compute_loss,
     mean_sink_margin,
     rank_claim_accuracy,
+    rank_claim_coordinate_loss,
+    rank_claim_coordinate_metrics,
+    rank_claim_inner_metrics,
+    rank_claim_inner_supervision_loss,
     rank_claim_supervision_loss,
     rank_slot_accuracy,
     rank_slot_routed_accuracy,
@@ -27,14 +31,26 @@ from organism_v01.metrics import (
 from organism_v01.organism import CellularOrganism
 from organism_v01.tasks import SINK_ASSIGNMENTS, TASK_NAMES, RoutingBatch, generate_task_batch
 
-CURRICULA = ("none", "multi_pair", "binding", "rule_binding", "rule_binding_damage", "rule_binding_final")
+CURRICULA = (
+    "none",
+    "multi_pair",
+    "binding",
+    "rule_binding",
+    "rule_binding_damage",
+    "rule_binding_final",
+    "claim_coordinate",
+)
 COMPATIBLE_UPDATE_RULE_LOADS = {
     ("rank_slot_rule_cued", "rank_slot_repair_rule_cued"),
     ("rank_slot_rule_cued", "rank_slot_claim_rule_cued"),
     ("rank_slot_rule_cued", "rank_slot_claim_residual_rule_cued"),
+    ("rank_slot_rule_cued", "rank_slot_claim_factor_rule_cued"),
     ("rank_slot_repair_rule_cued", "rank_slot_claim_rule_cued"),
     ("rank_slot_repair_rule_cued", "rank_slot_claim_residual_rule_cued"),
+    ("rank_slot_repair_rule_cued", "rank_slot_claim_factor_rule_cued"),
     ("rank_slot_claim_rule_cued", "rank_slot_claim_residual_rule_cued"),
+    ("rank_slot_claim_rule_cued", "rank_slot_claim_factor_rule_cued"),
+    ("rank_slot_claim_residual_rule_cued", "rank_slot_claim_factor_rule_cued"),
 }
 
 
@@ -71,6 +87,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--consistency-weight", type=float, default=0.0)
     parser.add_argument("--consistency-margin", type=float, default=1.0)
     parser.add_argument("--claim-weight", type=float, default=0.0)
+    parser.add_argument("--claim-coordinate-weight", type=float, default=0.0)
+    parser.add_argument("--claim-inner-weight", type=float, default=0.0)
     parser.add_argument("--train-repair-only", action="store_true")
     parser.add_argument("--train-claim-only", action="store_true")
     parser.add_argument("--train-claim-gate-only", action="store_true")
@@ -211,17 +229,48 @@ def curriculum_batch_params(args: argparse.Namespace, step: int) -> dict[str, fl
 
     sink_assignment = args.sink_assignment
 
-    if args.curriculum in {"multi_pair", "binding", "rule_binding", "rule_binding_damage", "rule_binding_final"}:
+    if args.curriculum in {
+        "multi_pair",
+        "binding",
+        "rule_binding",
+        "rule_binding_damage",
+        "rule_binding_final",
+        "claim_coordinate",
+    }:
         if args.task != "multi":
             raise ValueError(f"--curriculum {args.curriculum} requires --task multi")
-        if args.curriculum in {"rule_binding", "rule_binding_damage", "rule_binding_final"} and int(getattr(args, "rule_channels", 0)) < 1:
+        if args.curriculum in {
+            "rule_binding",
+            "rule_binding_damage",
+            "rule_binding_final",
+            "claim_coordinate",
+        } and int(getattr(args, "rule_channels", 0)) < 1:
             raise ValueError(f"--curriculum {args.curriculum} requires --rule-channels >= 1")
+        if args.curriculum == "claim_coordinate" and int(args.pair_count) != 4:
+            raise ValueError("--curriculum claim_coordinate requires --pair-count 4")
         progress = step / max(args.steps, 1)
         task = "multi"
         if args.curriculum == "rule_binding_final":
             pair_count = args.pair_count
             sink_assignment = "reverse" if step % 2 else "cycle"
             damage_prob = args.damage_prob
+        elif args.curriculum == "claim_coordinate":
+            pair_count = 4
+            if progress < 0.20:
+                sink_assignment = "aligned"
+                damage_prob = 0.0
+            elif progress < 0.45:
+                sink_assignment = "reverse"
+                damage_prob = 0.0
+            elif progress < 0.65:
+                sink_assignment = "cycle"
+                damage_prob = 0.0
+            elif progress < 0.85:
+                sink_assignment = "reverse" if step % 2 else "cycle"
+                damage_prob = args.damage_prob * 0.5
+            else:
+                sink_assignment = "reverse" if step % 2 else "cycle"
+                damage_prob = args.damage_prob
         elif args.curriculum == "multi_pair":
             if progress < 0.20:
                 pair_count = 1
@@ -601,15 +650,23 @@ def main() -> None:
             raise ValueError("--train-repair-only requires --update-rule rank_slot_repair_rule_cued")
         trainable_parameter_count = freeze_non_repair_parameters(model)
     if args.train_claim_only:
-        if args.update_rule not in {"rank_slot_claim_rule_cued", "rank_slot_claim_residual_rule_cued"}:
+        if args.update_rule not in {
+            "rank_slot_claim_rule_cued",
+            "rank_slot_claim_residual_rule_cued",
+            "rank_slot_claim_factor_rule_cued",
+        }:
             raise ValueError("--train-claim-only requires a rank-slot claim update rule")
         trainable_parameter_count = freeze_non_claim_parameters(model)
     if args.train_claim_gate_only:
-        if args.update_rule != "rank_slot_claim_residual_rule_cued":
-            raise ValueError("--train-claim-gate-only requires --update-rule rank_slot_claim_residual_rule_cued")
+        if args.update_rule not in {"rank_slot_claim_residual_rule_cued", "rank_slot_claim_factor_rule_cued"}:
+            raise ValueError("--train-claim-gate-only requires a residual rank-slot claim update rule")
         trainable_parameter_count = freeze_non_claim_gate_parameters(model)
     if args.train_claim_state_only:
-        if args.update_rule not in {"rank_slot_claim_rule_cued", "rank_slot_claim_residual_rule_cued"}:
+        if args.update_rule not in {
+            "rank_slot_claim_rule_cued",
+            "rank_slot_claim_residual_rule_cued",
+            "rank_slot_claim_factor_rule_cued",
+        }:
             raise ValueError("--train-claim-state-only requires a rank-slot claim update rule")
         trainable_parameter_count = freeze_non_claim_state_parameters(model)
     claim_offset = claim_channel_offset(model, layout)
@@ -741,6 +798,30 @@ def main() -> None:
             )
             losses["claim"] = claim_loss
             losses["total"] = losses["total"] + claim_loss * args.claim_weight
+        if args.claim_coordinate_weight:
+            if claim_offset is None:
+                raise ValueError("--claim-coordinate-weight requires a rank-slot claim update rule")
+            losses = dict(losses)
+            claim_coordinate_loss = rank_claim_coordinate_loss(
+                rollout.final_state,
+                rollout.loss_batch,
+                layout,
+                claim_offset=claim_offset,
+            )
+            losses["claim_coordinate"] = claim_coordinate_loss
+            losses["total"] = losses["total"] + claim_coordinate_loss * args.claim_coordinate_weight
+        if args.claim_inner_weight:
+            if claim_offset is None:
+                raise ValueError("--claim-inner-weight requires a rank-slot claim update rule")
+            losses = dict(losses)
+            claim_inner_loss = rank_claim_inner_supervision_loss(
+                rollout.final_state,
+                rollout.loss_batch,
+                layout,
+                claim_offset=claim_offset,
+            )
+            losses["claim_inner"] = claim_inner_loss
+            losses["total"] = losses["total"] + claim_inner_loss * args.claim_inner_weight
 
         optimizer.zero_grad(set_to_none=True)
         losses["total"].backward()
@@ -761,6 +842,33 @@ def main() -> None:
                 )
                 if claim_offset is not None
                 else 0.0
+            )
+            claim_coordinate_metrics = (
+                rank_claim_coordinate_metrics(
+                    rollout.final_state.detach(),
+                    rollout.loss_batch,
+                    layout,
+                    claim_offset=claim_offset,
+                )
+                if claim_offset is not None
+                else {
+                    "claim_inner_outer_accuracy": 0.0,
+                    "claim_half_accuracy": 0.0,
+                    "claim_coordinate_accuracy": 0.0,
+                }
+            )
+            claim_inner_metrics = (
+                rank_claim_inner_metrics(
+                    rollout.final_state.detach(),
+                    rollout.loss_batch,
+                    layout,
+                    claim_offset=claim_offset,
+                )
+                if claim_offset is not None
+                else {
+                    "claim_inner_exact_accuracy": 0.0,
+                    "claim_inner_split_accuracy": 0.0,
+                }
             )
             margin = mean_sink_margin(rollout.final_state.detach(), rollout.loss_batch, layout)
             row = {
@@ -783,11 +891,17 @@ def main() -> None:
                 "slot_loss": float(losses.get("slot", losses["total"] * 0.0).item()),
                 "consistency_loss": float(losses.get("consistency", losses["total"] * 0.0).item()),
                 "claim_loss": float(losses.get("claim", losses["total"] * 0.0).item()),
+                "claim_coordinate_loss": float(
+                    losses.get("claim_coordinate", losses["total"] * 0.0).item()
+                ),
+                "claim_inner_loss": float(losses.get("claim_inner", losses["total"] * 0.0).item()),
                 "accuracy": accuracy,
                 "target_set_accuracy": set_accuracy,
                 "slot_accuracy": slot_accuracy,
                 "routed_slot_accuracy": routed_slot_accuracy,
                 "claim_accuracy": claim_accuracy,
+                **claim_coordinate_metrics,
+                **claim_inner_metrics,
                 "sink_margin": margin,
             }
             history.append(row)
@@ -875,6 +989,8 @@ def main() -> None:
             "consistency_weight": args.consistency_weight,
             "consistency_margin": args.consistency_margin,
             "claim_weight": args.claim_weight,
+            "claim_coordinate_weight": args.claim_coordinate_weight,
+            "claim_inner_weight": args.claim_inner_weight,
             "train_repair_only": args.train_repair_only,
             "train_claim_only": args.train_claim_only,
             "train_claim_gate_only": args.train_claim_gate_only,
