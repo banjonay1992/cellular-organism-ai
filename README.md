@@ -149,6 +149,7 @@ These are run artifacts, not hardcoded scores:
 - Multi-pair v0.13 damaged survival benchmark: added one-hot rule cues, rule-presence output gating, protected rank-slot organ updates, a final reverse/cycle curriculum, and static-damage gates. The first 5% static-damage checkpoint passed: reverse/cycle `target_set_accuracy = 0.6223958333333334 / 0.6744791666666666`, reverse/cycle routed slot accuracy `0.9192708333333334 / 0.8793402835726738`, and balanced erase-rule `0.125`. A 10% static-damage continuation also passed: reverse/cycle `target_set_accuracy = 0.5703125 / 0.8619791666666666`, reverse/cycle routed slot accuracy `0.8723958233992258 / 0.828125`, and balanced erase-rule `0.14322916666666669`.
 - Multi-pair v0.14 dynamic-injury recovery benchmark: promoted mid-rollout injury into a 3-pair reverse/cycle gate with recovery checkpoints and rank-slot diagnostics. Using the v0.13 10% static-damage checkpoint, a 48-step pre-injury / 48-step recovery run with 5% base damage plus 10% new mid-rollout injury passed. Reverse recovered from immediate `target_set_accuracy = 0.5364583333333334` to final `0.6145833333333334`; cycle recovered from `0.7447916666666666` to `0.9296875`. New blocked tissue was real: reverse/cycle newly blocked fractions were `0.06282552052289248 / 0.06150535323346654`.
 - Multi-pair v0.15 compounded-damage benchmark: added dynamic-injury training and a harder default benchmark with 10% base damage plus 10% new mid-rollout injury. The v0.13 checkpoint failed this gate at reverse dynamic `target_set_accuracy = 0.4791666666666667`. After a 450-step dynamic-injury continuation, the v0.15 checkpoint passed: reverse/cycle final dynamic `target_set_accuracy = 0.640625 / 0.9609375`, reverse/cycle routed slot accuracy `0.7986111069718996 / 0.79253472139438`, and reverse/cycle recovery deltas `0.07291666666666663 / 0.34635416666666663`.
+- Multi-pair v0.16 generalization audit: added a scenario matrix over unseen seeds, injury timing, injury severity, mild damage, and a larger 14x14 grid. The v0.15 checkpoint passed 5 of 6 scenarios. It passed baseline, early injury, late injury, mild damage, and higher injury. The only failure was larger-grid reverse: dynamic `target_set_accuracy = 0.4921875` in the 8-batch matrix and `0.484375` in a 16-batch confirmation run, just under the `0.50` gate. Larger-grid cycle passed at `0.875` / `0.90625`. This makes v0.17's target clear: randomized grid-size / scale-generalization recovery training.
 
 Example 3-pair damaged training path:
 
@@ -333,6 +334,30 @@ PYTHONPATH=src python3 -m organism_v01.benchmark_v15 \
   --report outputs/reports/benchmark-v15-dynamic010.json
 ```
 
+Run the v0.16 generalization audit:
+
+```bash
+PYTHONPATH=src python3 -m organism_v01.benchmark_v16 \
+  --model outputs/models/organism-v15-dynamic010.pt \
+  --batches 8 \
+  --batch-size 16 \
+  --grid-size 12 \
+  --rollout-steps 96 \
+  --scenarios all \
+  --seed 101600 \
+  --report outputs/reports/benchmark-v16-generalization.json
+
+PYTHONPATH=src python3 -m organism_v01.benchmark_v16 \
+  --model outputs/models/organism-v15-dynamic010.pt \
+  --batches 16 \
+  --batch-size 16 \
+  --grid-size 12 \
+  --rollout-steps 96 \
+  --scenarios larger_grid \
+  --seed 101600 \
+  --report outputs/reports/benchmark-v16-larger-grid-confirm.json
+```
+
 Audit whether two generated assignment rules are input-identical but target-conflicting:
 
 ```bash
@@ -472,3 +497,8 @@ In v0.15, the same injury mechanism is part of training. The trainer runs the
 first half of the rollout, applies new damage, then backprops through the
 recovery half against the injured batch. This teaches repair under compounded
 damage without adding pair route cues or stored answers.
+
+In v0.16, the benchmark stops asking only "did the trained condition pass?" and
+starts asking "where does recovery fail when conditions move?" The first answer
+is encouraging but specific: timing and severity generalize, while larger-grid
+reverse recovery needs scale-aware training.
