@@ -18,6 +18,7 @@ from organism_v01.metrics import (
     rank_slot_supervision_loss,
     target_peak_accuracy,
     target_set_accuracy,
+    worst_sink_consistency_loss,
 )
 from organism_v01.tasks import generate_multi_pair_batch, generate_routing_batch
 
@@ -71,6 +72,44 @@ class MetricTests(unittest.TestCase):
         first_row, first_col = [int(value) for value in batch.sink_rc[0]]
         final_state[0, layout.output_start + first_label, first_row, first_col] = -5.0
         self.assertLess(target_set_accuracy(final_state, batch, layout), 1.0)
+
+    def test_worst_sink_consistency_loss_targets_the_slipping_sink(self) -> None:
+        layout = ChannelLayout(hidden_channels=4)
+        batch = generate_multi_pair_batch(
+            batch_size=2,
+            grid_size=12,
+            layout=layout,
+            pair_count=4,
+            sink_assignment="reverse",
+            damage_prob=0.0,
+            seed=85,
+        )
+        final_state = torch.zeros_like(batch.initial)
+        assert batch.pair_labels is not None
+        assert batch.pair_sink_rc is not None
+
+        for item in range(batch.initial.shape[0]):
+            for pair_index in range(4):
+                row, col = [int(value) for value in batch.pair_sink_rc[item, pair_index]]
+                label = int(batch.pair_labels[item, pair_index])
+                final_state[item, layout.output_start + label, row, col] = 5.0
+                final_state[item, layout.output_start + (1 - label), row, col] = -5.0
+
+        matched_loss = worst_sink_consistency_loss(final_state, batch, layout, margin=1.0)
+        slipping_state = final_state.clone()
+        row, col = [int(value) for value in batch.pair_sink_rc[0, 1]]
+        label = int(batch.pair_labels[0, 1])
+        slipping_state[0, layout.output_start + label, row, col] = -2.0
+        slipping_state[0, layout.output_start + (1 - label), row, col] = 2.0
+        slipping_state.requires_grad_()
+
+        slipping_loss = worst_sink_consistency_loss(slipping_state, batch, layout, margin=1.0)
+        slipping_loss.backward()
+
+        self.assertLess(float(matched_loss), 0.01)
+        self.assertGreater(float(slipping_loss.detach()), float(matched_loss) + 1.0)
+        self.assertIsNotNone(slipping_state.grad)
+        self.assertGreater(float(slipping_state.grad.abs().sum()), 0.0)
 
     def test_binding_contrastive_loss_rewards_paired_endpoint_codes(self) -> None:
         layout = ChannelLayout(hidden_channels=6)

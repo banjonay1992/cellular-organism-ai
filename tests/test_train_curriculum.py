@@ -37,6 +37,12 @@ class TrainCurriculumTests(unittest.TestCase):
         self.assertEqual(args.dynamic_injury_prob, 0.2)
         self.assertEqual(dynamic_injury_steps(args), (7, 13))
 
+    def test_parser_exposes_consistency_loss_args(self) -> None:
+        args = build_parser().parse_args(["--consistency-weight", "0.3", "--consistency-margin", "1.5"])
+
+        self.assertEqual(args.consistency_weight, 0.3)
+        self.assertEqual(args.consistency_margin, 1.5)
+
     def test_parser_accepts_relative_rank_update_rule(self) -> None:
         args = build_parser().parse_args(["--update-rule", "relative_rank_rule_cued"])
 

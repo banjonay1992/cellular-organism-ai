@@ -20,6 +20,7 @@ from organism_v01.metrics import (
     rank_slot_routed_accuracy,
     rank_slot_supervision_loss,
     target_set_accuracy,
+    worst_sink_consistency_loss,
 )
 from organism_v01.organism import CellularOrganism
 from organism_v01.tasks import SINK_ASSIGNMENTS, TASK_NAMES, RoutingBatch, generate_task_batch
@@ -57,6 +58,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--binding-weight", type=float, default=0.0)
     parser.add_argument("--binding-temperature", type=float, default=0.2)
     parser.add_argument("--slot-weight", type=float, default=0.0)
+    parser.add_argument("--consistency-weight", type=float, default=0.0)
+    parser.add_argument("--consistency-margin", type=float, default=1.0)
     parser.add_argument("--dynamic-injury-prob", type=float, default=0.0)
     parser.add_argument("--dynamic-injury-pre-steps", type=int, default=None)
     parser.add_argument("--lr", type=float, default=2e-3)
@@ -541,6 +544,16 @@ def main() -> None:
             )
             losses["slot"] = slot_loss
             losses["total"] = losses["total"] + slot_loss * args.slot_weight
+        if args.consistency_weight:
+            losses = dict(losses)
+            consistency_loss = worst_sink_consistency_loss(
+                rollout.final_state,
+                rollout.loss_batch,
+                layout,
+                margin=args.consistency_margin,
+            )
+            losses["consistency"] = consistency_loss
+            losses["total"] = losses["total"] + consistency_loss * args.consistency_weight
 
         optimizer.zero_grad(set_to_none=True)
         losses["total"].backward()
@@ -571,6 +584,7 @@ def main() -> None:
                 "localization_loss": float(losses["localization"].item()),
                 "binding_loss": float(losses.get("binding", losses["total"] * 0.0).item()),
                 "slot_loss": float(losses.get("slot", losses["total"] * 0.0).item()),
+                "consistency_loss": float(losses.get("consistency", losses["total"] * 0.0).item()),
                 "accuracy": accuracy,
                 "target_set_accuracy": set_accuracy,
                 "slot_accuracy": slot_accuracy,
@@ -659,6 +673,8 @@ def main() -> None:
             "binding_weight": args.binding_weight,
             "binding_temperature": args.binding_temperature,
             "slot_weight": args.slot_weight,
+            "consistency_weight": args.consistency_weight,
+            "consistency_margin": args.consistency_margin,
             "dynamic_injury_prob": args.dynamic_injury_prob,
             "dynamic_injury_pre_steps": args.dynamic_injury_pre_steps,
             "lr": args.lr,

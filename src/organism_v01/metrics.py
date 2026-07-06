@@ -81,6 +81,43 @@ def mean_sink_margin(
     return float((correct - wrong).mean().item())
 
 
+def worst_sink_consistency_loss(
+    final_state: torch.Tensor,
+    batch: RoutingBatch,
+    layout: ChannelLayout,
+    *,
+    margin: float = 1.0,
+) -> torch.Tensor:
+    """Penalize the weakest sink margin for each generated item.
+
+    Average sink cross-entropy can look healthy while one sink per item still
+    slips. This loss pushes the minimum correct-vs-wrong margin across all
+    sinks in an item above a requested margin.
+    """
+
+    outputs = final_state[:, layout.output_slice]
+    predictions = outputs.permute(0, 2, 3, 1)
+    targets = batch.target.argmax(dim=1)
+    sink_mask = batch.sink_mask[:, 0].bool()
+    per_item_losses: list[torch.Tensor] = []
+
+    for item in range(outputs.shape[0]):
+        item_mask = sink_mask[item]
+        if int(item_mask.sum().item()) == 0:
+            per_item_losses.append(outputs[item].sum() * 0.0)
+            continue
+        item_logits = predictions[item][item_mask]
+        labels = targets[item][item_mask]
+        correct = item_logits.gather(1, labels.view(-1, 1)).squeeze(1)
+        wrong = item_logits.gather(1, (1 - labels).view(-1, 1)).squeeze(1)
+        weakest_margin = (correct - wrong).min()
+        per_item_losses.append(F.softplus(margin - weakest_margin))
+
+    if not per_item_losses:
+        return outputs.sum() * 0.0
+    return torch.stack(per_item_losses).mean()
+
+
 def output_localization(
     final_state: torch.Tensor,
     batch: RoutingBatch,
