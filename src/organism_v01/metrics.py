@@ -136,6 +136,22 @@ def binding_contrastive_loss(
     return (sink_to_source + source_to_sink) * 0.5
 
 
+def _rank_slot_assignments(pair_count: int, slot_count: int) -> tuple[tuple[int, int], ...]:
+    """Map available source ranks onto the fixed top/middle/bottom slot layout."""
+
+    if slot_count != 3:
+        if pair_count == slot_count:
+            return tuple((rank_index, rank_index) for rank_index in range(slot_count))
+        return ()
+    if pair_count == 1:
+        return ((0, 0), (2, 0))
+    if pair_count == 2:
+        return ((0, 0), (2, 1))
+    if pair_count == 3:
+        return ((0, 0), (1, 1), (2, 2))
+    return ()
+
+
 def rank_slot_supervision_loss(
     final_state: torch.Tensor,
     batch: RoutingBatch,
@@ -146,14 +162,17 @@ def rank_slot_supervision_loss(
 ) -> torch.Tensor:
     """Teach sink cells the generated source-rank label slots.
 
-    The rank-slot update reserves two hidden channels per source rank. This
-    auxiliary loss is deliberately limited to full-rank multi-pair batches so it
-    does not invent labels for the one-pair and two-pair curriculum stages.
+    The rank-slot update reserves two hidden channels per source rank. Partial
+    curriculum batches still carry rank information: one-pair batches supervise
+    top and bottom with the same source, two-pair batches supervise top and
+    bottom, and three-pair batches supervise top, middle, and bottom.
     """
 
     if batch.pair_labels is None or batch.pair_sink_rc is None:
         return final_state.sum() * 0.0
-    if batch.pair_labels.shape[1] != slot_count:
+    pair_count = batch.pair_labels.shape[1]
+    assignments = _rank_slot_assignments(pair_count, slot_count)
+    if not assignments:
         return final_state.sum() * 0.0
 
     slot_width = slot_count * layout.output_count
@@ -164,19 +183,56 @@ def rank_slot_supervision_loss(
     slot_slice = slice(slot_start, slot_start + slot_width)
     terms: list[torch.Tensor] = []
     for item in range(final_state.shape[0]):
-        target = torch.zeros(slot_width, device=final_state.device, dtype=final_state.dtype)
-        for rank_index in range(slot_count):
-            label = int(batch.pair_labels[item, rank_index].item())
-            target[rank_index * layout.output_count + label] = 1.0
-
-        for sink_index in range(slot_count):
+        for sink_index in range(pair_count):
             row, col = [int(value) for value in batch.pair_sink_rc[item, sink_index]]
-            logits = final_state[item, slot_slice, row, col]
-            terms.append(F.binary_cross_entropy_with_logits(logits, target))
+            logits = final_state[item, slot_slice, row, col].view(slot_count, layout.output_count)
+            for slot_index, pair_index in assignments:
+                label = batch.pair_labels[item, pair_index].view(1)
+                terms.append(F.cross_entropy(logits[slot_index].view(1, -1), label))
 
     if not terms:
         return final_state.sum() * 0.0
     return torch.stack(terms).mean()
+
+
+def rank_slot_accuracy(
+    final_state: torch.Tensor,
+    batch: RoutingBatch,
+    layout: ChannelLayout,
+    *,
+    slot_offset: int = 12,
+    slot_count: int = 3,
+) -> float:
+    """Strict per-sink accuracy for the active top/middle/bottom label slots."""
+
+    if batch.pair_labels is None or batch.pair_sink_rc is None:
+        return 0.0
+    pair_count = batch.pair_labels.shape[1]
+    assignments = _rank_slot_assignments(pair_count, slot_count)
+    if not assignments:
+        return 0.0
+
+    slot_width = slot_count * layout.output_count
+    slot_start = layout.hidden_start + slot_offset
+    if layout.hidden_channels < slot_offset + slot_width:
+        return 0.0
+
+    slot_slice = slice(slot_start, slot_start + slot_width)
+    slot_logits = final_state[:, slot_slice]
+    correct_sets: list[torch.Tensor] = []
+    for item in range(final_state.shape[0]):
+        for sink_index in range(pair_count):
+            row, col = [int(value) for value in batch.pair_sink_rc[item, sink_index]]
+            logits = slot_logits[item, :, row, col].view(slot_count, layout.output_count)
+            slot_correct: list[torch.Tensor] = []
+            for slot_index, pair_index in assignments:
+                label = batch.pair_labels[item, pair_index]
+                slot_correct.append(logits[slot_index].argmax(dim=0) == label)
+            correct_sets.append(torch.stack(slot_correct).all())
+
+    if not correct_sets:
+        return 0.0
+    return float(torch.stack(correct_sets).float().mean().item())
 
 
 def compute_loss(

@@ -14,6 +14,7 @@ from organism_v01.metrics import (
     classification_accuracy,
     compute_loss,
     mean_sink_margin,
+    rank_slot_accuracy,
     rank_slot_supervision_loss,
     target_set_accuracy,
 )
@@ -347,6 +348,7 @@ def main() -> None:
         if step == 1 or step % args.log_every == 0 or step == args.steps:
             accuracy = classification_accuracy(rollout.final_state.detach(), batch, layout)
             set_accuracy = target_set_accuracy(rollout.final_state.detach(), batch, layout)
+            slot_accuracy = rank_slot_accuracy(rollout.final_state.detach(), batch, layout)
             margin = mean_sink_margin(rollout.final_state.detach(), batch, layout)
             row = {
                 "step": step,
@@ -362,6 +364,7 @@ def main() -> None:
                 "slot_loss": float(losses.get("slot", losses["total"] * 0.0).item()),
                 "accuracy": accuracy,
                 "target_set_accuracy": set_accuracy,
+                "slot_accuracy": slot_accuracy,
                 "sink_margin": margin,
             }
             history.append(row)

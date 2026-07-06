@@ -12,6 +12,7 @@ from organism_v01.metrics import (
     compute_loss,
     mean_sink_margin,
     output_localization,
+    rank_slot_accuracy,
     target_peak_accuracy,
     target_set_accuracy,
 )
@@ -64,6 +65,7 @@ def evaluate_model(
         "accuracy": 0.0,
         "target_peak_accuracy": 0.0,
         "target_set_accuracy": 0.0,
+        "slot_accuracy": 0.0,
         "sink_margin": 0.0,
         "localization": 0.0,
     }
@@ -99,6 +101,7 @@ def evaluate_model(
             totals["accuracy"] += classification_accuracy(rollout.final_state, batch, layout)
             totals["target_peak_accuracy"] += target_peak_accuracy(rollout.final_state, batch, layout)
             totals["target_set_accuracy"] += target_set_accuracy(rollout.final_state, batch, layout)
+            totals["slot_accuracy"] += rank_slot_accuracy(rollout.final_state, batch, layout)
             totals["sink_margin"] += mean_sink_margin(rollout.final_state, batch, layout)
             totals["localization"] += output_localization(rollout.final_state, batch, layout)
 
