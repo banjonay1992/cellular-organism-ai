@@ -16,7 +16,12 @@ from organism_v01.channels import ChannelLayout
 
 
 DEFAULT_ASSIGNMENTS = ("aligned", "cycle", "reverse")
-SUPPORTED_UPDATE_RULES = {"rank_slot_rule_cued", "rank_slot_repair_rule_cued", "relative_rank_rule_cued"}
+SUPPORTED_UPDATE_RULES = {
+    "rank_slot_rule_cued",
+    "rank_slot_repair_rule_cued",
+    "rank_slot_claim_rule_cued",
+    "relative_rank_rule_cued",
+}
 
 
 def _rank_key(prefix: str, rank: int, pair_count: int) -> str:

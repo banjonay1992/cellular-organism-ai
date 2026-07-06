@@ -17,6 +17,7 @@ from organism_v01.train import (
     build_parser,
     curriculum_batch_params,
     dynamic_injury_steps,
+    freeze_non_claim_parameters,
     freeze_non_repair_parameters,
     load_initial_model,
     scale_training_params,
@@ -49,6 +50,12 @@ class TrainCurriculumTests(unittest.TestCase):
 
         self.assertTrue(args.train_repair_only)
 
+    def test_parser_exposes_claim_training_args(self) -> None:
+        args = build_parser().parse_args(["--claim-weight", "0.4", "--train-claim-only"])
+
+        self.assertEqual(args.claim_weight, 0.4)
+        self.assertTrue(args.train_claim_only)
+
     def test_parser_accepts_relative_rank_update_rule(self) -> None:
         args = build_parser().parse_args(["--update-rule", "relative_rank_rule_cued"])
 
@@ -58,6 +65,11 @@ class TrainCurriculumTests(unittest.TestCase):
         args = build_parser().parse_args(["--update-rule", "rank_slot_repair_rule_cued"])
 
         self.assertEqual(args.update_rule, "rank_slot_repair_rule_cued")
+
+    def test_parser_accepts_rank_slot_claim_update_rule(self) -> None:
+        args = build_parser().parse_args(["--update-rule", "rank_slot_claim_rule_cued"])
+
+        self.assertEqual(args.update_rule, "rank_slot_claim_rule_cued")
 
     def test_scale_training_params_cycle_in_two_step_blocks(self) -> None:
         args = build_parser().parse_args(
@@ -402,6 +414,49 @@ class TrainCurriculumTests(unittest.TestCase):
         self.assertTrue(torch.equal(source.cell_update.local_match[-1].bias, target.cell_update.local_match[-1].bias))
         self.assertTrue(hasattr(target.cell_update, "repair_match"))
 
+    def test_load_initial_model_allows_rank_slot_claim_warm_start(self) -> None:
+        layout = ChannelLayout(hidden_channels=32, rule_channels=3)
+        source = CellularOrganism(
+            layout=layout,
+            cell_hidden=16,
+            update_rule="rank_slot_rule_cued",
+        )
+        target = CellularOrganism(
+            layout=layout,
+            cell_hidden=16,
+            update_rule="rank_slot_claim_rule_cued",
+        )
+
+        with torch.no_grad():
+            source.cell_update.local_match[-1].bias.add_(3.0)
+            target.cell_update.local_match[-1].bias.zero_()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "checkpoint.pt"
+            torch.save(
+                {
+                    "model_state_dict": source.state_dict(),
+                    "layout": {"hidden_channels": 32, "route_channels": 0, "rule_channels": 3},
+                    "args": {"cell_hidden": 16, "update_rule": "rank_slot_rule_cued"},
+                },
+                path,
+            )
+            load_initial_model(
+                target,
+                init_model=str(path),
+                device=torch.device("cpu"),
+                expected_hidden_channels=32,
+                expected_route_channels=0,
+                expected_rule_channels=3,
+                expected_cell_hidden=16,
+                expected_update_rule="rank_slot_claim_rule_cued",
+                expected_message_slots=8,
+                expected_tag_slots=4,
+            )
+
+        self.assertTrue(torch.equal(source.cell_update.local_match[-1].bias, target.cell_update.local_match[-1].bias))
+        self.assertTrue(hasattr(target.cell_update, "claim_match"))
+
     def test_freeze_non_repair_parameters_leaves_only_repair_trainable(self) -> None:
         layout = ChannelLayout(hidden_channels=32, rule_channels=3)
         model = CellularOrganism(
@@ -418,6 +473,23 @@ class TrainCurriculumTests(unittest.TestCase):
         self.assertTrue(trainable_names)
         self.assertTrue(frozen_names)
         self.assertTrue(all("repair" in name for name in trainable_names))
+
+    def test_freeze_non_claim_parameters_leaves_only_claim_trainable(self) -> None:
+        layout = ChannelLayout(hidden_channels=32, rule_channels=3)
+        model = CellularOrganism(
+            layout=layout,
+            cell_hidden=16,
+            update_rule="rank_slot_claim_rule_cued",
+        )
+
+        trainable_count = freeze_non_claim_parameters(model)
+        trainable_names = [name for name, parameter in model.named_parameters() if parameter.requires_grad]
+        frozen_names = [name for name, parameter in model.named_parameters() if not parameter.requires_grad]
+
+        self.assertGreater(trainable_count, 0)
+        self.assertTrue(trainable_names)
+        self.assertTrue(frozen_names)
+        self.assertTrue(all("claim" in name for name in trainable_names))
 
     def test_load_initial_model_rejects_self_tagging_slot_mismatch(self) -> None:
         layout = ChannelLayout(hidden_channels=4)

@@ -16,6 +16,8 @@ from organism_v01.metrics import (
     classification_accuracy,
     compute_loss,
     mean_sink_margin,
+    rank_claim_accuracy,
+    rank_claim_supervision_loss,
     rank_slot_accuracy,
     rank_slot_routed_accuracy,
     rank_slot_supervision_loss,
@@ -28,6 +30,8 @@ from organism_v01.tasks import SINK_ASSIGNMENTS, TASK_NAMES, RoutingBatch, gener
 CURRICULA = ("none", "multi_pair", "binding", "rule_binding", "rule_binding_damage", "rule_binding_final")
 COMPATIBLE_UPDATE_RULE_LOADS = {
     ("rank_slot_rule_cued", "rank_slot_repair_rule_cued"),
+    ("rank_slot_rule_cued", "rank_slot_claim_rule_cued"),
+    ("rank_slot_repair_rule_cued", "rank_slot_claim_rule_cued"),
 }
 
 
@@ -63,7 +67,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--slot-weight", type=float, default=0.0)
     parser.add_argument("--consistency-weight", type=float, default=0.0)
     parser.add_argument("--consistency-margin", type=float, default=1.0)
+    parser.add_argument("--claim-weight", type=float, default=0.0)
     parser.add_argument("--train-repair-only", action="store_true")
+    parser.add_argument("--train-claim-only", action="store_true")
     parser.add_argument("--dynamic-injury-prob", type=float, default=0.0)
     parser.add_argument("--dynamic-injury-pre-steps", type=int, default=None)
     parser.add_argument("--lr", type=float, default=2e-3)
@@ -426,6 +432,18 @@ def freeze_non_repair_parameters(model: CellularOrganism) -> int:
     return trainable_count
 
 
+def freeze_non_claim_parameters(model: CellularOrganism) -> int:
+    trainable_count = 0
+    for name, parameter in model.named_parameters():
+        should_train = "claim" in name
+        parameter.requires_grad_(should_train)
+        if should_train:
+            trainable_count += parameter.numel()
+    if trainable_count == 0:
+        raise ValueError("--train-claim-only requires claim parameters")
+    return trainable_count
+
+
 def main() -> None:
     args = build_parser().parse_args()
     if args.steps <= 0:
@@ -437,6 +455,8 @@ def main() -> None:
     else:
         dynamic_pre_steps = args.rollout_steps
         dynamic_post_steps = 0
+    if args.train_repair_only and args.train_claim_only:
+        raise ValueError("--train-repair-only and --train-claim-only cannot both be set")
     scale_training_params(args, 1)
 
     device = choose_device(args.device)
@@ -471,6 +491,10 @@ def main() -> None:
         if args.update_rule != "rank_slot_repair_rule_cued":
             raise ValueError("--train-repair-only requires --update-rule rank_slot_repair_rule_cued")
         trainable_parameter_count = freeze_non_repair_parameters(model)
+    if args.train_claim_only:
+        if args.update_rule != "rank_slot_claim_rule_cued":
+            raise ValueError("--train-claim-only requires --update-rule rank_slot_claim_rule_cued")
+        trainable_parameter_count = freeze_non_claim_parameters(model)
     optimizer = torch.optim.AdamW((parameter for parameter in model.parameters() if parameter.requires_grad), lr=args.lr)
 
     baseline_metrics = evaluate_model(
@@ -587,6 +611,17 @@ def main() -> None:
             )
             losses["consistency"] = consistency_loss
             losses["total"] = losses["total"] + consistency_loss * args.consistency_weight
+        if args.claim_weight:
+            if not hasattr(model.cell_update, "claim_start"):
+                raise ValueError("--claim-weight requires update_rule=rank_slot_claim_rule_cued")
+            losses = dict(losses)
+            claim_loss = rank_claim_supervision_loss(
+                rollout.final_state,
+                rollout.loss_batch,
+                layout,
+            )
+            losses["claim"] = claim_loss
+            losses["total"] = losses["total"] + claim_loss * args.claim_weight
 
         optimizer.zero_grad(set_to_none=True)
         losses["total"].backward()
@@ -598,6 +633,7 @@ def main() -> None:
             set_accuracy = target_set_accuracy(rollout.final_state.detach(), rollout.loss_batch, layout)
             slot_accuracy = rank_slot_accuracy(rollout.final_state.detach(), rollout.loss_batch, layout)
             routed_slot_accuracy = rank_slot_routed_accuracy(rollout.final_state.detach(), rollout.loss_batch, layout)
+            claim_accuracy = rank_claim_accuracy(rollout.final_state.detach(), rollout.loss_batch, layout)
             margin = mean_sink_margin(rollout.final_state.detach(), rollout.loss_batch, layout)
             row = {
                 "step": step,
@@ -618,10 +654,12 @@ def main() -> None:
                 "binding_loss": float(losses.get("binding", losses["total"] * 0.0).item()),
                 "slot_loss": float(losses.get("slot", losses["total"] * 0.0).item()),
                 "consistency_loss": float(losses.get("consistency", losses["total"] * 0.0).item()),
+                "claim_loss": float(losses.get("claim", losses["total"] * 0.0).item()),
                 "accuracy": accuracy,
                 "target_set_accuracy": set_accuracy,
                 "slot_accuracy": slot_accuracy,
                 "routed_slot_accuracy": routed_slot_accuracy,
+                "claim_accuracy": claim_accuracy,
                 "sink_margin": margin,
             }
             history.append(row)
@@ -708,7 +746,9 @@ def main() -> None:
             "slot_weight": args.slot_weight,
             "consistency_weight": args.consistency_weight,
             "consistency_margin": args.consistency_margin,
+            "claim_weight": args.claim_weight,
             "train_repair_only": args.train_repair_only,
+            "train_claim_only": args.train_claim_only,
             "trainable_parameter_count": trainable_parameter_count,
             "dynamic_injury_prob": args.dynamic_injury_prob,
             "dynamic_injury_pre_steps": args.dynamic_injury_pre_steps,

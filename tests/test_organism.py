@@ -9,7 +9,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from organism_v01.channels import ChannelLayout
-from organism_v01.metrics import compute_loss, rank_slot_accuracy, rank_slot_routed_accuracy
+from organism_v01.metrics import compute_loss, rank_claim_supervision_loss, rank_slot_accuracy, rank_slot_routed_accuracy
 from organism_v01.organism import CellularOrganism
 from organism_v01.tasks import generate_memory_batch, generate_multi_pair_batch, generate_routing_batch
 
@@ -380,6 +380,60 @@ class OrganismTests(unittest.TestCase):
                 layout=layout,
                 cell_hidden=16,
                 update_rule="rank_slot_repair_rule_cued",
+            )
+
+    def test_rank_slot_claim_rule_cued_builds_claim_organ_and_backpropagates(self) -> None:
+        torch.manual_seed(25)
+        layout = ChannelLayout(hidden_channels=32, rule_channels=3)
+        batch = generate_multi_pair_batch(
+            batch_size=4,
+            grid_size=12,
+            layout=layout,
+            pair_count=4,
+            sink_assignment="reverse",
+            damage_prob=0.0,
+            seed=129,
+        )
+        model = CellularOrganism(
+            layout=layout,
+            cell_hidden=16,
+            update_rule="rank_slot_claim_rule_cued",
+        )
+
+        rollout = model(batch, steps=40)
+        losses = compute_loss(
+            rollout.final_state,
+            batch,
+            layout,
+            activity_loss=rollout.activity_loss,
+        )
+        claim_loss = rank_claim_supervision_loss(rollout.final_state, batch, layout)
+        (losses["total"] + claim_loss * 0.1).backward()
+        grad_norm = sum(
+            float(parameter.grad.abs().sum())
+            for parameter in model.parameters()
+            if parameter.grad is not None
+        )
+        source_rank_label_channels = slice(layout.hidden_start + 20, layout.hidden_start + 28)
+        claim_channels = slice(layout.hidden_start + 28, layout.hidden_start + 32)
+        source_rank_label_energy = (rollout.final_state[:, source_rank_label_channels] * batch.sink_mask).detach().abs().sum()
+        claim_energy = (rollout.final_state[:, claim_channels] * batch.sink_mask).detach().abs().sum()
+
+        self.assertTrue(torch.allclose(rollout.final_state[:, : layout.env_count], batch.env))
+        self.assertGreater(float(source_rank_label_energy), 0.0)
+        self.assertGreater(float(claim_energy), 0.0)
+        self.assertTrue(torch.isfinite(claim_loss))
+        self.assertTrue(torch.isfinite(losses["total"]))
+        self.assertGreater(grad_norm, 0.0)
+
+    def test_rank_slot_claim_rule_cued_requires_claim_channels(self) -> None:
+        layout = ChannelLayout(hidden_channels=31, rule_channels=3)
+
+        with self.assertRaises(ValueError):
+            CellularOrganism(
+                layout=layout,
+                cell_hidden=16,
+                update_rule="rank_slot_claim_rule_cued",
             )
 
     def test_relative_rank_rule_cued_separates_four_source_ranks(self) -> None:

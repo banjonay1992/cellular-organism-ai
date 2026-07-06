@@ -13,6 +13,8 @@ from organism_v01.metrics import (
     binding_contrastive_loss,
     classification_accuracy,
     mean_sink_margin,
+    rank_claim_accuracy,
+    rank_claim_supervision_loss,
     rank_slot_accuracy,
     rank_slot_routed_accuracy,
     rank_slot_supervision_loss,
@@ -108,6 +110,46 @@ class MetricTests(unittest.TestCase):
 
         self.assertLess(float(matched_loss), 0.01)
         self.assertGreater(float(slipping_loss.detach()), float(matched_loss) + 1.0)
+        self.assertIsNotNone(slipping_state.grad)
+        self.assertGreater(float(slipping_state.grad.abs().sum()), 0.0)
+
+    def test_rank_claim_supervision_targets_source_rank_claims(self) -> None:
+        layout = ChannelLayout(hidden_channels=32, rule_channels=3)
+        batch = generate_multi_pair_batch(
+            batch_size=2,
+            grid_size=12,
+            layout=layout,
+            pair_count=4,
+            sink_assignment="reverse",
+            damage_prob=0.0,
+            seed=86,
+        )
+        final_state = torch.zeros_like(batch.initial)
+        claim_start = layout.hidden_start + 28
+        assert batch.pair_sink_rc is not None
+
+        for item in range(batch.initial.shape[0]):
+            for pair_index in range(4):
+                row, col = [int(value) for value in batch.pair_sink_rc[item, pair_index]]
+                final_state[item, claim_start + pair_index, row, col] = 4.0
+                wrong_rank = (pair_index + 1) % 4
+                final_state[item, claim_start + wrong_rank, row, col] = -4.0
+
+        matched_loss = rank_claim_supervision_loss(final_state, batch, layout)
+        self.assertLess(float(matched_loss), 0.1)
+        self.assertEqual(rank_claim_accuracy(final_state, batch, layout), 1.0)
+
+        slipping_state = final_state.clone()
+        row, col = [int(value) for value in batch.pair_sink_rc[0, 2]]
+        slipping_state[0, claim_start + 2, row, col] = -3.0
+        slipping_state[0, claim_start + 1, row, col] = 3.0
+        slipping_state.requires_grad_()
+
+        slipping_loss = rank_claim_supervision_loss(slipping_state, batch, layout)
+        slipping_loss.backward()
+
+        self.assertGreater(float(slipping_loss.detach()), float(matched_loss) + 0.1)
+        self.assertLess(rank_claim_accuracy(slipping_state.detach(), batch, layout), 1.0)
         self.assertIsNotNone(slipping_state.grad)
         self.assertGreater(float(slipping_state.grad.abs().sum()), 0.0)
 

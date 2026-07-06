@@ -1010,6 +1010,243 @@ class RankSlotRepairRuleCuedCellUpdate(RankSlotRuleCuedCellUpdate):
         return delta
 
 
+class RankSlotClaimRuleCuedCellUpdate(RankSlotRuleCuedCellUpdate):
+    """Rank-slot organ with explicit sink-to-source rank claims."""
+
+    def __init__(
+        self,
+        channels: int,
+        *,
+        hidden_start: int,
+        hidden_channels: int,
+        source_a: int,
+        source_b: int,
+        sink: int,
+        output_start: int,
+        rule_start: int,
+        rule_channels: int,
+        hidden: int = 64,
+    ) -> None:
+        if hidden_channels < 32:
+            raise ValueError("rank_slot_claim_rule_cued requires at least 32 hidden channels")
+        super().__init__(
+            channels,
+            hidden_start=hidden_start,
+            hidden_channels=hidden_channels,
+            source_a=source_a,
+            source_b=source_b,
+            sink=sink,
+            output_start=output_start,
+            rule_start=rule_start,
+            rule_channels=rule_channels,
+            hidden=hidden,
+        )
+
+        self.source_rank_label_start = hidden_start + 20
+        self.source_rank_label_channels = 8
+        self.claim_start = hidden_start + 28
+        self.claim_channels = 4
+        self.claim_seed = nn.Sequential(
+            nn.Conv2d(self.claim_channels + rule_channels, 16, kernel_size=1),
+            nn.SiLU(),
+            nn.Conv2d(16, self.claim_channels, kernel_size=1),
+        )
+        self.claim_match = nn.Sequential(
+            nn.Conv2d(
+                self.organ_channels + self.source_rank_label_channels + self.claim_channels + 2 + rule_channels,
+                64,
+                kernel_size=1,
+            ),
+            nn.SiLU(),
+            nn.Conv2d(64, 2, kernel_size=1),
+        )
+
+        rank_centers = torch.tensor([-0.72, -0.24, 0.24, 0.72]).view(1, self.claim_channels, 1, 1)
+        rank_label_kernel = torch.zeros(1, 1, 3, 3)
+        rank_label_kernel[0, 0, 1, 0] = 0.74
+        rank_label_kernel[0, 0, 0, 0] = 0.10
+        rank_label_kernel[0, 0, 2, 0] = 0.10
+        rank_label_kernel[0, 0, 1, 1] = 0.06
+        claim_kernel = torch.zeros(1, 1, 3, 3)
+        claim_kernel[0, 0, 1, 1] = 0.58
+        claim_kernel[0, 0, 0, 1] = 0.16
+        claim_kernel[0, 0, 2, 1] = 0.16
+        claim_kernel[0, 0, 1, 0] = 0.05
+        claim_kernel[0, 0, 1, 2] = 0.05
+        self.register_buffer("rank_centers", rank_centers)
+        self.register_buffer("rank_label_kernel", rank_label_kernel)
+        self.register_buffer("claim_kernel", claim_kernel)
+
+        final_claim = self.claim_match[-1]
+        if isinstance(final_claim, nn.Conv2d):
+            nn.init.zeros_(final_claim.weight)
+            nn.init.zeros_(final_claim.bias)
+        final_seed = self.claim_seed[-1]
+        if isinstance(final_seed, nn.Conv2d):
+            nn.init.normal_(final_seed.weight, mean=0.0, std=5e-3)
+            nn.init.zeros_(final_seed.bias)
+
+    def _rank_bins(self, down: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+        coordinate = ((down - up) / (down + up).clamp_min(1.0)).clamp(-1.0, 1.0)
+        scores = -18.0 * (coordinate - self.rank_centers).square()
+        return torch.softmax(scores, dim=1)
+
+    def _rank_label_target(self, label_state: torch.Tensor, label_seed: torch.Tensor) -> torch.Tensor:
+        kernel = self.rank_label_kernel.expand(self.source_rank_label_channels, 1, 3, 3)
+        carried = torch.nn.functional.conv2d(
+            label_state,
+            kernel,
+            padding=1,
+            groups=self.source_rank_label_channels,
+        )
+        return (label_seed + carried * 0.98).clamp(0.0, 4.0)
+
+    def _claim_target(self, claim_state: torch.Tensor, claim_seed: torch.Tensor) -> torch.Tensor:
+        kernel = self.claim_kernel.expand(self.claim_channels, 1, 3, 3)
+        carried = torch.nn.functional.conv2d(
+            claim_state,
+            kernel,
+            padding=1,
+            groups=self.claim_channels,
+        )
+        return (claim_seed + carried * 0.96).clamp(-4.0, 4.0)
+
+    def forward(self, state: torch.Tensor) -> torch.Tensor:
+        source_a_marker = state[:, self.source_a : self.source_a + 1].clamp(0.0, 1.0)
+        source_b_marker = state[:, self.source_b : self.source_b + 1].clamp(0.0, 1.0)
+        source_marker = (source_a_marker + source_b_marker).clamp(0.0, 1.0)
+        sink_marker = state[:, self.sink : self.sink + 1].clamp(0.0, 1.0)
+        match_slice = slice(self.match_start, self.match_start + self.organ_channels)
+        match_features = state[:, match_slice]
+        label_slice = slice(self.source_rank_label_start, self.source_rank_label_start + self.source_rank_label_channels)
+        source_rank_label_state = state[:, label_slice]
+        claim_slice = slice(self.claim_start, self.claim_start + self.claim_channels)
+        claim_state = state[:, claim_slice]
+
+        source_down_state = state[:, self.source_down : self.source_down + 1]
+        source_up_state = state[:, self.source_up : self.source_up + 1]
+        sink_down_state = state[:, self.sink_down : self.sink_down + 1]
+        sink_up_state = state[:, self.sink_up : self.sink_up + 1]
+        source_at_sink_down_state = state[:, self.source_at_sink_down : self.source_at_sink_down + 1]
+        source_at_sink_up_state = state[:, self.source_at_sink_up : self.source_at_sink_up + 1]
+        sink_at_source_down_state = state[:, self.sink_at_source_down : self.sink_at_source_down + 1]
+        sink_at_source_up_state = state[:, self.sink_at_source_up : self.sink_at_source_up + 1]
+        source_a_down_state = state[:, self.source_a_down : self.source_a_down + 1]
+        source_a_up_state = state[:, self.source_a_up : self.source_a_up + 1]
+        source_b_down_state = state[:, self.source_b_down : self.source_b_down + 1]
+        source_b_up_state = state[:, self.source_b_up : self.source_b_up + 1]
+        rank_down_state = state[:, self.rank_down : self.rank_down + 1]
+        rank_up_state = state[:, self.rank_up : self.rank_up + 1]
+
+        perceived = self.perception(state)
+        match_context = self.match_read(match_features)
+        readout = self.readout(torch.cat([perceived, match_context], dim=1))
+        delta = self.delta(readout) * torch.sigmoid(self.update_gate(readout))
+
+        source_down_target = self._propagate(source_down_state, self.source_down_kernel, source_marker)
+        source_up_target = self._propagate(source_up_state, self.source_up_kernel, source_marker)
+        sink_down_target = self._propagate(sink_down_state, self.sink_down_kernel, sink_marker)
+        sink_up_target = self._propagate(sink_up_state, self.sink_up_kernel, sink_marker)
+        source_a_down_target = self._propagate(source_a_down_state, self.source_down_kernel, source_a_marker)
+        source_a_up_target = self._propagate(source_a_up_state, self.source_up_kernel, source_a_marker)
+        source_b_down_target = self._propagate(source_b_down_state, self.source_down_kernel, source_b_marker)
+        source_b_up_target = self._propagate(source_b_up_state, self.source_up_kernel, source_b_marker)
+        rank_down_target = self._vertical_propagate(rank_down_state, self.vertical_down_kernel, source_marker)
+        rank_up_target = self._vertical_propagate(rank_up_state, self.vertical_up_kernel, source_marker)
+
+        above = torch.nn.functional.conv2d(rank_down_state, self.vertical_down_kernel, padding=1).clamp_min(0.0)
+        below = torch.nn.functional.conv2d(rank_up_state, self.vertical_up_kernel, padding=1).clamp_min(0.0)
+        has_above = torch.sigmoid((above - 0.12) * 16.0)
+        has_below = torch.sigmoid((below - 0.12) * 16.0)
+        no_above = 1.0 - has_above
+        no_below = 1.0 - has_below
+        isolated_seed = no_above * no_below * 0.12
+        top_seed = source_marker * no_above * (has_below + isolated_seed)
+        bottom_seed = source_marker * no_below * (has_above + isolated_seed)
+        middle_seed = source_marker * has_above * has_below
+
+        slot_targets = [
+            self._slot_propagate(state[:, self.top_a : self.top_a + 1], top_seed * source_a_marker),
+            self._slot_propagate(state[:, self.top_b : self.top_b + 1], top_seed * source_b_marker),
+            self._slot_propagate(state[:, self.middle_a : self.middle_a + 1], middle_seed * source_a_marker),
+            self._slot_propagate(state[:, self.middle_b : self.middle_b + 1], middle_seed * source_b_marker),
+            self._slot_propagate(state[:, self.bottom_a : self.bottom_a + 1], bottom_seed * source_a_marker),
+            self._slot_propagate(state[:, self.bottom_b : self.bottom_b + 1], bottom_seed * source_b_marker),
+        ]
+        wave_targets = torch.cat(
+            [
+                source_down_target,
+                source_up_target,
+                sink_down_target,
+                sink_up_target,
+                self._anchor_target(source_at_sink_down_state, source_down_target, sink_marker),
+                self._anchor_target(source_at_sink_up_state, source_up_target, sink_marker),
+                self._anchor_target(sink_at_source_down_state, sink_down_target, source_marker),
+                self._anchor_target(sink_at_source_up_state, sink_up_target, source_marker),
+                source_a_down_target,
+                source_a_up_target,
+                source_b_down_target,
+                source_b_up_target,
+                *slot_targets,
+                rank_down_target,
+                rank_up_target,
+            ],
+            dim=1,
+        )
+        wave_delta = (wave_targets - match_features) * 0.40
+
+        source_rank_bins = self._rank_bins(rank_down_state, rank_up_state)
+        source_rank_label_seed = torch.cat(
+            [
+                source_rank_bins * source_a_marker,
+                source_rank_bins * source_b_marker,
+            ],
+            dim=1,
+        )
+        source_rank_label_target = self._rank_label_target(source_rank_label_state, source_rank_label_seed)
+        source_rank_label_delta = (source_rank_label_target - source_rank_label_state) * 0.40
+
+        rule_context = state[:, self.rule_start : self.rule_start + self.rule_channels]
+        sink_rank_bins = self._rank_bins(sink_down_state, sink_up_state)
+        claim_seed = self.claim_seed(torch.cat([sink_rank_bins, rule_context], dim=1)) * sink_marker
+        claim_target = self._claim_target(claim_state, claim_seed)
+        claim_delta = (claim_target - claim_state) * 0.36
+
+        base_local_output = self.local_match(torch.cat([wave_targets, rule_context], dim=1)) * sink_marker
+        claim_weights = torch.softmax(claim_state, dim=1)
+        claimed_label = torch.cat(
+            [
+                (claim_weights * source_rank_label_state[:, : self.claim_channels]).sum(dim=1, keepdim=True),
+                (claim_weights * source_rank_label_state[:, self.claim_channels :]).sum(dim=1, keepdim=True),
+            ],
+            dim=1,
+        )
+        claim_output = self.claim_match(
+            torch.cat(
+                [
+                    wave_targets,
+                    source_rank_label_state,
+                    claim_state,
+                    claimed_label * sink_marker,
+                    rule_context,
+                ],
+                dim=1,
+            )
+        ) * sink_marker
+
+        output_delta = base_local_output + claim_output
+        if self.rule_channels > 1:
+            rule_presence = rule_context.sum(dim=1, keepdim=True).clamp(0.0, 1.0)
+            output_delta = output_delta * rule_presence
+
+        delta = delta.clone()
+        delta[:, match_slice] = wave_delta
+        delta[:, label_slice] = source_rank_label_delta
+        delta[:, claim_slice] = claim_delta
+        delta[:, self.output_start : self.output_start + 2] = output_delta
+        return delta
+
+
 class RelativeRankRuleCuedCellUpdate(nn.Module):
     """Rule-cued readout with scalable relative-rank label moments."""
 
@@ -1257,5 +1494,6 @@ UPDATE_RULES = (
     "rule_cued_matching_readout",
     "rank_slot_rule_cued",
     "rank_slot_repair_rule_cued",
+    "rank_slot_claim_rule_cued",
     "relative_rank_rule_cued",
 )

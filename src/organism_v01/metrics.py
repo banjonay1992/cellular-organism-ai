@@ -118,6 +118,78 @@ def worst_sink_consistency_loss(
     return torch.stack(per_item_losses).mean()
 
 
+def rank_claim_supervision_loss(
+    final_state: torch.Tensor,
+    batch: RoutingBatch,
+    layout: ChannelLayout,
+    *,
+    claim_offset: int = 28,
+    claim_channels: int = 4,
+) -> torch.Tensor:
+    """Teach sink cells which generated source rank they claim.
+
+    The target is computed from the generated source/sink pairing metadata, not
+    from stored answers. For a reverse four-pair item, the bottom sink still
+    claims source rank 0 because `pair_sink_rc[:, 0]` is that source's sink.
+    """
+
+    if batch.pair_sink_rc is None:
+        return final_state.sum() * 0.0
+    pair_count = batch.pair_sink_rc.shape[1]
+    if pair_count < 1 or pair_count > claim_channels:
+        return final_state.sum() * 0.0
+
+    claim_start = layout.hidden_start + claim_offset
+    if layout.hidden_channels < claim_offset + claim_channels:
+        return final_state.sum() * 0.0
+
+    claim_logits = final_state[:, claim_start : claim_start + claim_channels]
+    terms: list[torch.Tensor] = []
+    for item in range(final_state.shape[0]):
+        for pair_index in range(pair_count):
+            row, col = [int(value) for value in batch.pair_sink_rc[item, pair_index]]
+            logits = claim_logits[item, :, row, col].view(1, -1)
+            target = torch.tensor([pair_index], device=final_state.device)
+            terms.append(F.cross_entropy(logits, target))
+
+    if not terms:
+        return final_state.sum() * 0.0
+    return torch.stack(terms).mean()
+
+
+def rank_claim_accuracy(
+    final_state: torch.Tensor,
+    batch: RoutingBatch,
+    layout: ChannelLayout,
+    *,
+    claim_offset: int = 28,
+    claim_channels: int = 4,
+) -> float:
+    """Per-sink accuracy for the generated source-rank claim channels."""
+
+    if batch.pair_sink_rc is None:
+        return 0.0
+    pair_count = batch.pair_sink_rc.shape[1]
+    if pair_count < 1 or pair_count > claim_channels:
+        return 0.0
+
+    claim_start = layout.hidden_start + claim_offset
+    if layout.hidden_channels < claim_offset + claim_channels:
+        return 0.0
+
+    claim_logits = final_state[:, claim_start : claim_start + claim_channels]
+    correct: list[torch.Tensor] = []
+    for item in range(final_state.shape[0]):
+        for pair_index in range(pair_count):
+            row, col = [int(value) for value in batch.pair_sink_rc[item, pair_index]]
+            predicted = claim_logits[item, :, row, col].argmax(dim=0)
+            correct.append(predicted == pair_index)
+
+    if not correct:
+        return 0.0
+    return float(torch.stack(correct).float().mean().item())
+
+
 def output_localization(
     final_state: torch.Tensor,
     batch: RoutingBatch,

@@ -156,6 +156,7 @@ These are run artifacts, not hardcoded scores:
 - Multi-pair v0.20 relative-rank/mirror experiment: added a `relative_rank_rule_cued` organ with source/sink count waves and source-label rank moments, so the body can represent more than top/middle/bottom without adding a fourth answer slot. A cold 300-step run proved the organ can form distinct four-rank coordinates, but was not competitive. The stronger branch continued from the v0.17 organism with 4-pair mirror training and no slot supervision. On the same v0.19 seed, reverse inner source ranks improved from `0.57421875 / 0.546875` to `0.66015625 / 0.7421875`; reverse dynamic `target_set_accuracy` improved from `0.3359375` to `0.39453125`, while cycle stayed usable at `0.75390625`. The v0.18 gate still fails because reverse static accuracy is only `0.36328125` against the `0.40` static gate, so v0.20 is progress, not a solved 4-pair organism.
 - Multi-pair v0.21 consistency objective: added a worst-sink consistency loss that penalizes each generated item's weakest correct-vs-wrong sink margin, targeting the common "3 of 4 sinks right" failure directly. The objective is tested and trainable through `--consistency-weight` / `--consistency-margin`, but it did not solve four-pair reverse by itself. A mixed continuation from v0.20 improved cycle dynamic `target_set_accuracy` to `0.828125`, but reverse dynamic stayed at `0.3828125` versus the v0.20 same-seed `0.39453125`, with `44.921875%` of items still landing at exactly 3 correct sinks. Reverse-only and static-reverse continuations also failed the v0.18 gate; the static-reverse branch ended at reverse static/dynamic `0.37109375 / 0.35546875`, while cycle stayed `0.71484375 / 0.71875`. The result is useful: local margin pressure can sharpen an easier rule, but the reverse wall is a coordinated rank-binding error, not just weak sink logits.
 - Multi-pair v0.22 repair-bus experiment: added `rank_slot_repair_rule_cued`, which keeps the rank-slot organ but reserves four hidden channels for a recurrent sink/source repair loop. Sinks broadcast their current A/B vote leftward, sources answer rightward with label repair signals, and a new repair readout can be trained either with the whole organism or alone through `--train-repair-only`. The mechanism is alive and tested, but this version does not solve four-pair reverse. Mixed repair training reached reverse static/dynamic `0.3984375 / 0.37109375` and cycle dynamic `0.79296875`; reverse-only repair reached reverse dynamic `0.3671875`; repair-only training preserved the base more cleanly but reached only `0.359375`. The lesson is sharper: a feedback bus is not enough if its messages are just label votes. The next organ probably needs explicit permutation/assignment state, where sinks negotiate which source rank they claim, not only which label they currently believe.
+- Multi-pair v0.23 rank-claim organ: added `rank_slot_claim_rule_cued`, with 8 source-rank label channels, 4 sink claim channels, claim-only warm starts, and a generated claim supervision loss. The internal claim state does learn above chance: static clean claim pretrain ended at train claim accuracy `0.4375`, and dynamic continuation peaked at `0.53125` on a logged minibatch. But the current output path does not generalize. Held-out v0.19 diagnostics for `organism-v23-claim-dynamic.pt` reached reverse static/dynamic `0.20703125 / 0.26171875`, cycle dynamic `0.05859375`, and aligned dynamic `0.07421875`, worse than v0.20. Conclusion: explicit claim state is learnable, but claim-to-output takeover is wrong; the next attempt should verify held-out claim accuracy first, then distill claims into output with a safer residual gate.
 
 Example 3-pair damaged training path:
 
@@ -628,6 +629,82 @@ PYTHONPATH=src python3 -m organism_v01.benchmark_v19 \
   --report outputs/reports/benchmark-v22-repair-diagnostics.json
 ```
 
+Train and probe the v0.23 rank-claim organ:
+
+```bash
+PYTHONPATH=src python3 -m organism_v01.train \
+  --task multi \
+  --curriculum none \
+  --steps 220 \
+  --batch-size 8 \
+  --grid-size 14 \
+  --rollout-steps 112 \
+  --hidden-channels 32 \
+  --rule-channels 3 \
+  --cell-hidden 64 \
+  --update-rule rank_slot_claim_rule_cued \
+  --train-claim-only \
+  --damage-prob 0.0 \
+  --pair-count 4 \
+  --min-pair-spacing 1 \
+  --sink-assignment reverse \
+  --field-weight 0.5 \
+  --localization-weight 1.0 \
+  --slot-weight 0.0 \
+  --claim-weight 2.0 \
+  --consistency-weight 0.10 \
+  --consistency-margin 1.0 \
+  --lr 0.0015 \
+  --seed 1030 \
+  --init-model outputs/models/organism-v20-reverse-polish.pt \
+  --save-model outputs/models/organism-v23-claim-static.pt \
+  --report outputs/reports/train-v23-claim-static.json
+
+PYTHONPATH=src python3 -m organism_v01.train \
+  --task multi \
+  --curriculum none \
+  --steps 260 \
+  --batch-size 8 \
+  --grid-size 14 \
+  --rollout-steps 112 \
+  --hidden-channels 32 \
+  --rule-channels 3 \
+  --cell-hidden 64 \
+  --update-rule rank_slot_claim_rule_cued \
+  --train-claim-only \
+  --damage-prob 0.10 \
+  --dynamic-injury-prob 0.10 \
+  --dynamic-injury-pre-steps 56 \
+  --pair-count 4 \
+  --min-pair-spacing 1 \
+  --sink-assignment reverse \
+  --field-weight 0.5 \
+  --localization-weight 1.0 \
+  --slot-weight 0.0 \
+  --claim-weight 1.2 \
+  --consistency-weight 0.15 \
+  --consistency-margin 1.0 \
+  --lr 0.0008 \
+  --seed 1031 \
+  --init-model outputs/models/organism-v23-claim-static.pt \
+  --save-model outputs/models/organism-v23-claim-dynamic.pt \
+  --report outputs/reports/train-v23-claim-dynamic.json
+
+PYTHONPATH=src python3 -m organism_v01.benchmark_v19 \
+  --model outputs/models/organism-v23-claim-dynamic.pt \
+  --batches 16 \
+  --batch-size 16 \
+  --grid-size 14 \
+  --rollout-steps 112 \
+  --pre-steps 56 \
+  --damage-prob 0.10 \
+  --injury-prob 0.10 \
+  --pair-count 4 \
+  --assignments aligned,cycle,reverse \
+  --seed 112100 \
+  --report outputs/reports/benchmark-v23-claim-dynamic-diagnostics.json
+```
+
 Audit whether two generated assignment rules are input-identical but target-conflicting:
 
 ```bash
@@ -814,3 +891,13 @@ readout. The failed result says the content of the message matters. Label-vote
 feedback tends to reinforce local beliefs, while the unsolved reverse case
 needs shared assignment state: a sink should communicate "I claim source rank
 2" or "rank 1 and rank 2 conflict", not merely "I think the answer is A".
+
+In v0.23, that shared assignment state is explicit. Sources seed rank-indexed
+A/B labels, sinks maintain four claim channels, and the claim readout can choose
+the source-rank label a sink believes it owns. The encouraging sign is that the
+claim channels can learn generated rank targets without hardcoded answers. The
+bad sign is that using those claims as an output path currently destabilizes the
+held-out four-pair behavior. The next version should separate three questions:
+whether held-out claims are right, whether claims survive injury, and whether a
+small residual output gate can use them without erasing the already useful v0.20
+behavior.
