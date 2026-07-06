@@ -13,10 +13,13 @@ from organism_v01.metrics import (
     classification_accuracy,
     compute_loss,
     mean_sink_margin,
+    output_localization,
+    rank_slot_accuracy,
+    rank_slot_routed_accuracy,
     target_peak_accuracy,
     target_set_accuracy,
 )
-from organism_v01.organism import CellularOrganism
+from organism_v01.organism import CellularOrganism, clamp_environment
 from organism_v01.tasks import SINK_ASSIGNMENTS, TASK_NAMES, RoutingBatch, generate_task_batch
 
 
@@ -102,7 +105,10 @@ def evaluate_dynamic_injury(
         "accuracy": 0.0,
         "target_peak_accuracy": 0.0,
         "target_set_accuracy": 0.0,
+        "slot_accuracy": 0.0,
+        "routed_slot_accuracy": 0.0,
         "sink_margin": 0.0,
+        "localization": 0.0,
     }
     with torch.no_grad():
         for index in range(batches):
@@ -142,8 +148,144 @@ def evaluate_dynamic_injury(
             totals["accuracy"] += classification_accuracy(second.final_state, injured, layout)
             totals["target_peak_accuracy"] += target_peak_accuracy(second.final_state, injured, layout)
             totals["target_set_accuracy"] += target_set_accuracy(second.final_state, injured, layout)
+            totals["slot_accuracy"] += rank_slot_accuracy(second.final_state, injured, layout)
+            totals["routed_slot_accuracy"] += rank_slot_routed_accuracy(second.final_state, injured, layout)
             totals["sink_margin"] += mean_sink_margin(second.final_state, injured, layout)
+            totals["localization"] += output_localization(second.final_state, injured, layout)
     return {key: value / batches for key, value in totals.items()}
+
+
+def state_metrics(
+    state: torch.Tensor,
+    batch: RoutingBatch,
+    layout: ChannelLayout,
+) -> dict[str, float]:
+    return {
+        "accuracy": classification_accuracy(state, batch, layout),
+        "target_peak_accuracy": target_peak_accuracy(state, batch, layout),
+        "target_set_accuracy": target_set_accuracy(state, batch, layout),
+        "slot_accuracy": rank_slot_accuracy(state, batch, layout),
+        "routed_slot_accuracy": rank_slot_routed_accuracy(state, batch, layout),
+        "sink_margin": mean_sink_margin(state, batch, layout),
+        "localization": output_localization(state, batch, layout),
+    }
+
+
+def _add_metric_dict(totals: dict[str, float], metrics: dict[str, float]) -> None:
+    for key, value in metrics.items():
+        totals[key] = totals.get(key, 0.0) + value
+
+
+def _average_metric_dict(totals: dict[str, float], count: int) -> dict[str, float]:
+    return {key: value / count for key, value in totals.items()}
+
+
+def _injury_extent(before: RoutingBatch, after: RoutingBatch, layout: ChannelLayout) -> dict[str, float]:
+    before_blocked = before.env[:, layout.blocked].bool()
+    after_blocked = after.env[:, layout.blocked].bool()
+    newly_blocked = after_blocked & ~before_blocked
+    return {
+        "newly_blocked_fraction": float(newly_blocked.float().mean().item()),
+        "blocked_fraction_before": float(before_blocked.float().mean().item()),
+        "blocked_fraction_after": float(after_blocked.float().mean().item()),
+    }
+
+
+def evaluate_dynamic_injury_recovery(
+    model: CellularOrganism,
+    layout: ChannelLayout,
+    *,
+    batches: int,
+    batch_size: int,
+    grid_size: int,
+    pre_steps: int,
+    recovery_steps: tuple[int, ...],
+    damage_prob: float,
+    injury_prob: float,
+    task: str,
+    coordinate_fields: bool,
+    pair_count: int,
+    min_pair_spacing: int,
+    sink_assignment: str,
+    memory_input_steps: int,
+    seed: int,
+    device: torch.device,
+) -> dict[str, Any]:
+    if batches <= 0:
+        raise ValueError("batches must be positive")
+    if pre_steps <= 0:
+        raise ValueError("pre_steps must be positive")
+    if not recovery_steps:
+        raise ValueError("recovery_steps must not be empty")
+    ordered_steps = tuple(sorted(set(recovery_steps)))
+    if ordered_steps[0] < 0:
+        raise ValueError("recovery_steps must be non-negative")
+
+    model.eval()
+    pre_totals: dict[str, float] = {}
+    recovery_totals: dict[int, dict[str, float]] = {step: {} for step in ordered_steps}
+    extent_totals = {
+        "newly_blocked_fraction": 0.0,
+        "blocked_fraction_before": 0.0,
+        "blocked_fraction_after": 0.0,
+    }
+
+    with torch.no_grad():
+        for index in range(batches):
+            batch = generate_task_batch(
+                task=task,
+                batch_size=batch_size,
+                grid_size=grid_size,
+                layout=layout,
+                damage_prob=damage_prob,
+                coordinate_fields=coordinate_fields,
+                pair_count=pair_count,
+                min_pair_spacing=min_pair_spacing,
+                sink_assignment=sink_assignment,
+                memory_input_steps=memory_input_steps,
+                seed=seed + index,
+                device=device,
+            )
+            before_injury = model(batch, steps=pre_steps)
+            _add_metric_dict(pre_totals, state_metrics(before_injury.final_state, batch, layout))
+
+            injured = apply_random_injury(
+                batch,
+                layout,
+                injury_prob=injury_prob,
+                seed=seed + 50_000 + index,
+            ).to(device)
+            for key, value in _injury_extent(batch, injured, layout).items():
+                extent_totals[key] += value
+
+            current_state = clamp_environment(
+                before_injury.final_state,
+                injured,
+                layout,
+                step_index=pre_steps,
+            )
+            previous_step = 0
+            for step in ordered_steps:
+                if step > previous_step:
+                    recovered = model(
+                        injured,
+                        steps=step - previous_step,
+                        start_state=current_state,
+                        start_step=pre_steps + previous_step,
+                    )
+                    current_state = recovered.final_state
+                    previous_step = step
+                _add_metric_dict(recovery_totals[step], state_metrics(current_state, injured, layout))
+
+    averaged_recovery = {
+        str(step): _average_metric_dict(totals, batches) for step, totals in recovery_totals.items()
+    }
+    return {
+        "pre_injury": _average_metric_dict(pre_totals, batches),
+        "recovery": averaged_recovery,
+        "final": averaged_recovery[str(ordered_steps[-1])],
+        "injury": {key: value / batches for key, value in extent_totals.items()},
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -147,6 +147,7 @@ These are run artifacts, not hardcoded scores:
 - Assignment ambiguity audit: reverse and cycle assignments can present identical inputs with different targets. In `outputs/reports/assignment-ambiguity-reverse-cycle.json`, reverse vs cycle had identical inputs for `2048 / 2048` sampled items and conflicting targets for `1001 / 2048` items. That means one uncued model cannot be expected to satisfy both reverse and cycle rules simultaneously without an assignment/rule cue; the cycle check is useful as a contradiction probe, not as a fair all-in-one pass gate for uncued inputs.
 - Multi-pair v0.12 organ-first benchmark: added a clean 3-pair benchmark, strict and routed rank-slot diagnostics, and a rank-slot organ with separate vertical morphogen waves for top/middle/bottom seeding. The first clean checkpoint passed: reverse `target_set_accuracy = 0.6419270833333334`, cycle `0.7903645833333334`, reverse strict/routed slot accuracy `0.8133680547277132 / 0.9605034776031971`, cycle strict/routed slot accuracy `0.8407118084530035 / 0.9201388893028101`, and balanced erase-rule `0.5390625` under the `0.55` gate. Damage is intentionally not part of this pass yet.
 - Multi-pair v0.13 damaged survival benchmark: added one-hot rule cues, rule-presence output gating, protected rank-slot organ updates, a final reverse/cycle curriculum, and static-damage gates. The first 5% static-damage checkpoint passed: reverse/cycle `target_set_accuracy = 0.6223958333333334 / 0.6744791666666666`, reverse/cycle routed slot accuracy `0.9192708333333334 / 0.8793402835726738`, and balanced erase-rule `0.125`. A 10% static-damage continuation also passed: reverse/cycle `target_set_accuracy = 0.5703125 / 0.8619791666666666`, reverse/cycle routed slot accuracy `0.8723958233992258 / 0.828125`, and balanced erase-rule `0.14322916666666669`.
+- Multi-pair v0.14 dynamic-injury recovery benchmark: promoted mid-rollout injury into a 3-pair reverse/cycle gate with recovery checkpoints and rank-slot diagnostics. Using the v0.13 10% static-damage checkpoint, a 48-step pre-injury / 48-step recovery run with 5% base damage plus 10% new mid-rollout injury passed. Reverse recovered from immediate `target_set_accuracy = 0.5364583333333334` to final `0.6145833333333334`; cycle recovered from `0.7447916666666666` to `0.9296875`. New blocked tissue was real: reverse/cycle newly blocked fractions were `0.06282552052289248 / 0.06150535323346654`.
 
 Example 3-pair damaged training path:
 
@@ -276,6 +277,22 @@ PYTHONPATH=src python3 -m organism_v01.benchmark_v13 \
   --report outputs/reports/benchmark-v13-damage010.json
 ```
 
+Run the v0.14 dynamic-injury 3-pair recovery benchmark:
+
+```bash
+PYTHONPATH=src python3 -m organism_v01.benchmark_v14 \
+  --model outputs/models/organism-v13-damage010.pt \
+  --batches 24 \
+  --batch-size 16 \
+  --grid-size 12 \
+  --rollout-steps 96 \
+  --pre-steps 48 \
+  --damage-prob 0.05 \
+  --injury-prob 0.10 \
+  --seed 71400 \
+  --report outputs/reports/benchmark-v14-dynamic-injury.json
+```
+
 Audit whether two generated assignment rules are input-identical but target-conflicting:
 
 ```bash
@@ -403,3 +420,10 @@ In v0.13, `rank_slot_rule_cued` uses one-hot rule cues and gates output by rule
 presence, so erasing the rule cue produces a true blank instead of an accidental
 default rule. Its rank-slot organ update is protected from learned throttling,
 and the trained checkpoint survives static damage up to the current 10% gate.
+
+In v0.14, mid-rollout injury is measured as a recovery curve rather than a
+single final score. The benchmark damages new tissue after the organism has
+already spent half its rollout forming internal waves, then tracks immediate,
+12-step, 24-step, and 48-step recovery. The current checkpoint improves after
+injury on both reverse and cycle assignments while keeping routed rank-slot
+accuracy above the dynamic gate.
