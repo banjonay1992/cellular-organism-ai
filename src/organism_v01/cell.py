@@ -583,8 +583,8 @@ class RankSlotRuleCuedCellUpdate(nn.Module):
         hidden: int = 64,
     ) -> None:
         super().__init__()
-        if hidden_channels < 18:
-            raise ValueError("rank_slot_rule_cued requires at least 18 hidden channels")
+        if hidden_channels < 20:
+            raise ValueError("rank_slot_rule_cued requires at least 20 hidden channels")
         if rule_channels < 1:
             raise ValueError("rank_slot_rule_cued requires at least 1 rule channel")
 
@@ -613,6 +613,8 @@ class RankSlotRuleCuedCellUpdate(nn.Module):
         self.middle_b = hidden_start + 15
         self.bottom_a = hidden_start + 16
         self.bottom_b = hidden_start + 17
+        self.rank_down = hidden_start + 18
+        self.rank_up = hidden_start + 19
 
         groups = _largest_group_count(hidden)
         self.perception = nn.Sequential(
@@ -622,8 +624,9 @@ class RankSlotRuleCuedCellUpdate(nn.Module):
             nn.Conv2d(hidden, hidden, kernel_size=1),
             nn.SiLU(),
         )
-        self.wave_gate = nn.Conv2d(hidden, 18, kernel_size=1)
-        self.match_read = nn.Conv2d(18, 16, kernel_size=1)
+        self.organ_channels = 20
+        self.wave_gate = nn.Conv2d(hidden, self.organ_channels, kernel_size=1)
+        self.match_read = nn.Conv2d(self.organ_channels, 16, kernel_size=1)
         self.readout = nn.Sequential(
             nn.Conv2d(hidden + 16, hidden, kernel_size=1),
             nn.SiLU(),
@@ -633,7 +636,7 @@ class RankSlotRuleCuedCellUpdate(nn.Module):
         self.delta = nn.Conv2d(hidden, channels, kernel_size=1)
         self.update_gate = nn.Conv2d(hidden, channels, kernel_size=1)
         self.local_match = nn.Sequential(
-            nn.Conv2d(18 + rule_channels, 24, kernel_size=1),
+            nn.Conv2d(self.organ_channels + rule_channels, 24, kernel_size=1),
             nn.SiLU(),
             nn.Conv2d(24, 2, kernel_size=1),
         )
@@ -643,11 +646,25 @@ class RankSlotRuleCuedCellUpdate(nn.Module):
         self.register_buffer("sink_down_kernel", SinkStabilizedRankCellUpdate._make_kernel(vertical="down", horizontal="left"))
         self.register_buffer("sink_up_kernel", SinkStabilizedRankCellUpdate._make_kernel(vertical="up", horizontal="left"))
         self.register_buffer("diffuse_kernel", SinkStabilizedRankCellUpdate._make_diffuse_kernel())
+        vertical_down_kernel = torch.zeros(1, 1, 3, 3)
+        vertical_down_kernel[0, 0, 0, 1] = 1.0
+        vertical_up_kernel = torch.zeros(1, 1, 3, 3)
+        vertical_up_kernel[0, 0, 2, 1] = 1.0
+        slot_kernel = torch.zeros(1, 1, 3, 3)
+        slot_kernel[0, 0, 1, 0] = 0.76
+        slot_kernel[0, 0, 0, 0] = 0.12
+        slot_kernel[0, 0, 2, 0] = 0.12
+        slot_kernel[0, 0, 1, 1] = 0.08
+        self.register_buffer("vertical_down_kernel", vertical_down_kernel)
+        self.register_buffer("vertical_up_kernel", vertical_up_kernel)
+        self.register_buffer("slot_kernel", slot_kernel)
 
         nn.init.normal_(self.delta.weight, mean=0.0, std=5e-3)
         nn.init.zeros_(self.delta.bias)
         nn.init.zeros_(self.update_gate.weight)
         nn.init.zeros_(self.update_gate.bias)
+        nn.init.zeros_(self.wave_gate.weight)
+        nn.init.constant_(self.wave_gate.bias, 2.0)
         final_match = self.local_match[-1]
         if isinstance(final_match, nn.Conv2d):
             nn.init.normal_(final_match.weight, mean=0.0, std=1e-3)
@@ -663,16 +680,20 @@ class RankSlotRuleCuedCellUpdate(nn.Module):
         return torch.where(marker.bool(), incoming, diffused_anchor).clamp(-4.0, 4.0)
 
     def _slot_propagate(self, wave: torch.Tensor, seed: torch.Tensor) -> torch.Tensor:
-        down = torch.nn.functional.conv2d(wave, self.source_down_kernel, padding=1)
-        up = torch.nn.functional.conv2d(wave, self.source_up_kernel, padding=1)
-        return (seed + (down + up) * 0.48).clamp(0.0, 4.0)
+        carried = torch.nn.functional.conv2d(wave, self.slot_kernel, padding=1)
+        return (seed + carried * 0.98).clamp(0.0, 4.0)
+
+    @staticmethod
+    def _vertical_propagate(wave: torch.Tensor, kernel: torch.Tensor, marker: torch.Tensor) -> torch.Tensor:
+        propagated = torch.nn.functional.conv2d(wave, kernel, padding=1)
+        return (marker + propagated * 0.98).clamp(0.0, 4.0)
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         source_a_marker = state[:, self.source_a : self.source_a + 1].clamp(0.0, 1.0)
         source_b_marker = state[:, self.source_b : self.source_b + 1].clamp(0.0, 1.0)
         source_marker = (source_a_marker + source_b_marker).clamp(0.0, 1.0)
         sink_marker = state[:, self.sink : self.sink + 1].clamp(0.0, 1.0)
-        match_slice = slice(self.match_start, self.match_start + 18)
+        match_slice = slice(self.match_start, self.match_start + self.organ_channels)
         match_features = state[:, match_slice]
 
         source_down_state = state[:, self.source_down : self.source_down + 1]
@@ -687,6 +708,8 @@ class RankSlotRuleCuedCellUpdate(nn.Module):
         source_a_up_state = state[:, self.source_a_up : self.source_a_up + 1]
         source_b_down_state = state[:, self.source_b_down : self.source_b_down + 1]
         source_b_up_state = state[:, self.source_b_up : self.source_b_up + 1]
+        rank_down_state = state[:, self.rank_down : self.rank_down + 1]
+        rank_up_state = state[:, self.rank_up : self.rank_up + 1]
 
         perceived = self.perception(state)
         match_context = self.match_read(match_features)
@@ -701,14 +724,21 @@ class RankSlotRuleCuedCellUpdate(nn.Module):
         source_a_up_target = self._propagate(source_a_up_state, self.source_up_kernel, source_a_marker)
         source_b_down_target = self._propagate(source_b_down_state, self.source_down_kernel, source_b_marker)
         source_b_up_target = self._propagate(source_b_up_state, self.source_up_kernel, source_b_marker)
+        rank_down_target = self._vertical_propagate(rank_down_state, self.vertical_down_kernel, source_marker)
+        rank_up_target = self._vertical_propagate(rank_up_state, self.vertical_up_kernel, source_marker)
 
-        above = torch.nn.functional.conv2d(source_down_state, self.source_down_kernel, padding=1) - source_down_state * 0.18
-        below = torch.nn.functional.conv2d(source_up_state, self.source_up_kernel, padding=1) - source_up_state * 0.18
+        above = torch.nn.functional.conv2d(rank_down_state, self.vertical_down_kernel, padding=1)
+        below = torch.nn.functional.conv2d(rank_up_state, self.vertical_up_kernel, padding=1)
         above = above.clamp_min(0.0)
         below = below.clamp_min(0.0)
-        top_seed = source_marker * torch.sigmoid((0.08 - above) * 8.0)
-        bottom_seed = source_marker * torch.sigmoid((0.08 - below) * 8.0)
-        middle_seed = source_marker * torch.sigmoid((above - 0.08) * 8.0) * torch.sigmoid((below - 0.08) * 8.0)
+        has_above = torch.sigmoid((above - 0.12) * 16.0)
+        has_below = torch.sigmoid((below - 0.12) * 16.0)
+        no_above = 1.0 - has_above
+        no_below = 1.0 - has_below
+        isolated_seed = no_above * no_below * 0.12
+        top_seed = source_marker * no_above * (has_below + isolated_seed)
+        bottom_seed = source_marker * no_below * (has_above + isolated_seed)
+        middle_seed = source_marker * has_above * has_below
 
         slot_targets = [
             self._slot_propagate(state[:, self.top_a : self.top_a + 1], top_seed * source_a_marker),
@@ -733,6 +763,8 @@ class RankSlotRuleCuedCellUpdate(nn.Module):
                 source_b_down_target,
                 source_b_up_target,
                 *slot_targets,
+                rank_down_target,
+                rank_up_target,
             ],
             dim=1,
         )

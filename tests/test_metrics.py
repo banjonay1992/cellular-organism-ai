@@ -14,6 +14,7 @@ from organism_v01.metrics import (
     classification_accuracy,
     mean_sink_margin,
     rank_slot_accuracy,
+    rank_slot_routed_accuracy,
     rank_slot_supervision_loss,
     target_peak_accuracy,
     target_set_accuracy,
@@ -139,16 +140,20 @@ class MetricTests(unittest.TestCase):
 
         matched_loss = rank_slot_supervision_loss(final_state, batch, layout)
         matched_accuracy = rank_slot_accuracy(final_state, batch, layout)
+        matched_routed_accuracy = rank_slot_routed_accuracy(final_state, batch, layout)
         wrong_state = final_state.clone()
         first_row, first_col = [int(value) for value in batch.pair_sink_rc[0, 0]]
         wrong_state[0, slot_slice, first_row, first_col] = -wrong_state[0, slot_slice, first_row, first_col]
         wrong_loss = rank_slot_supervision_loss(wrong_state, batch, layout)
         wrong_accuracy = rank_slot_accuracy(wrong_state, batch, layout)
+        wrong_routed_accuracy = rank_slot_routed_accuracy(wrong_state, batch, layout)
 
         self.assertTrue(torch.isfinite(matched_loss))
         self.assertLess(float(matched_loss), float(wrong_loss))
         self.assertEqual(matched_accuracy, 1.0)
+        self.assertEqual(matched_routed_accuracy, 1.0)
         self.assertLess(wrong_accuracy, 1.0)
+        self.assertLess(wrong_routed_accuracy, 1.0)
 
     def test_rank_slot_supervision_loss_teaches_two_pair_top_and_bottom_slots(self) -> None:
         layout = ChannelLayout(hidden_channels=20, rule_channels=1)
@@ -177,16 +182,20 @@ class MetricTests(unittest.TestCase):
 
         matched_loss = rank_slot_supervision_loss(final_state, batch, layout)
         matched_accuracy = rank_slot_accuracy(final_state, batch, layout)
+        matched_routed_accuracy = rank_slot_routed_accuracy(final_state, batch, layout)
         wrong_state = final_state.clone()
         first_row, first_col = [int(value) for value in batch.pair_sink_rc[0, 0]]
         wrong_state[0, slot_slice, first_row, first_col] = -wrong_state[0, slot_slice, first_row, first_col]
         wrong_loss = rank_slot_supervision_loss(wrong_state, batch, layout)
         wrong_accuracy = rank_slot_accuracy(wrong_state, batch, layout)
+        wrong_routed_accuracy = rank_slot_routed_accuracy(wrong_state, batch, layout)
 
         self.assertTrue(torch.isfinite(matched_loss))
         self.assertLess(float(matched_loss), float(wrong_loss))
         self.assertEqual(matched_accuracy, 1.0)
+        self.assertEqual(matched_routed_accuracy, 1.0)
         self.assertLess(wrong_accuracy, 1.0)
+        self.assertLess(wrong_routed_accuracy, 1.0)
 
     def test_rank_slot_supervision_loss_teaches_single_pair_as_top_and_bottom(self) -> None:
         layout = ChannelLayout(hidden_channels=20, rule_channels=1)
@@ -213,16 +222,20 @@ class MetricTests(unittest.TestCase):
 
         matched_loss = rank_slot_supervision_loss(final_state, batch, layout)
         matched_accuracy = rank_slot_accuracy(final_state, batch, layout)
+        matched_routed_accuracy = rank_slot_routed_accuracy(final_state, batch, layout)
         wrong_state = final_state.clone()
         first_row, first_col = [int(value) for value in batch.pair_sink_rc[0, 0]]
         wrong_state[0, slot_slice, first_row, first_col] = -wrong_state[0, slot_slice, first_row, first_col]
         wrong_loss = rank_slot_supervision_loss(wrong_state, batch, layout)
         wrong_accuracy = rank_slot_accuracy(wrong_state, batch, layout)
+        wrong_routed_accuracy = rank_slot_routed_accuracy(wrong_state, batch, layout)
 
         self.assertTrue(torch.isfinite(matched_loss))
         self.assertLess(float(matched_loss), float(wrong_loss))
         self.assertEqual(matched_accuracy, 1.0)
+        self.assertEqual(matched_routed_accuracy, 1.0)
         self.assertLess(wrong_accuracy, 1.0)
+        self.assertLess(wrong_routed_accuracy, 1.0)
 
 
 if __name__ == "__main__":

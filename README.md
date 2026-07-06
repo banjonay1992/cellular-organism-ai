@@ -145,6 +145,7 @@ These are run artifacts, not hardcoded scores:
 - Multi-pair v0.8 sink-stabilized rank benchmark: added lateral source/sink order waves plus endpoint anchors, and reserved those rank channels so the learned update cannot overwrite them. The continued checkpoint reached reverse `0.302734375`, injury `0.33984375`, cycle `0.31640625`, and 2-pair reverse stress `0.5`. Diagnostics now show balanced rank magnitude at sources and sinks, so signal delivery improved; stable learned matching across all 3 pairs is still not solved.
 - Multi-pair v0.9 matching-readout benchmark: added a sink-local readout over source-label waves and an optional contrastive endpoint binding loss. The first matching-readout checkpoint reached reverse `0.26953125`, injury `0.296875`, cycle `0.265625`, and 2-pair reverse stress `0.5416666666666666`. A binding-loss continuation reached reverse `0.263671875`, injury `0.28515625`, cycle `0.27734375`, and 2-pair reverse stress `0.4270833333333333`. Result: the readout can exploit easier 2-pair structure, but endpoint embeddings stayed near random for 3-pair binding.
 - Assignment ambiguity audit: reverse and cycle assignments can present identical inputs with different targets. In `outputs/reports/assignment-ambiguity-reverse-cycle.json`, reverse vs cycle had identical inputs for `2048 / 2048` sampled items and conflicting targets for `1001 / 2048` items. That means one uncued model cannot be expected to satisfy both reverse and cycle rules simultaneously without an assignment/rule cue; the cycle check is useful as a contradiction probe, not as a fair all-in-one pass gate for uncued inputs.
+- Multi-pair v0.12 organ-first benchmark: added a clean 3-pair benchmark, strict and routed rank-slot diagnostics, and a rank-slot organ with separate vertical morphogen waves for top/middle/bottom seeding. The first clean checkpoint passed: reverse `target_set_accuracy = 0.6419270833333334`, cycle `0.7903645833333334`, reverse strict/routed slot accuracy `0.8133680547277132 / 0.9605034776031971`, cycle strict/routed slot accuracy `0.8407118084530035 / 0.9201388893028101`, and balanced erase-rule `0.5390625` under the `0.55` gate. Damage is intentionally not part of this pass yet.
 
 Example 3-pair damaged training path:
 
@@ -243,6 +244,20 @@ PYTHONPATH=src python3 -m organism_v01.benchmark_v06 \
   --model outputs/models/organism-v06-self-tagging.pt \
   --batches 12 \
   --report outputs/reports/benchmark-v06-self-tagging-continued.json
+```
+
+Run the v0.12 organ-first clean 3-pair benchmark:
+
+```bash
+PYTHONPATH=src python3 -m organism_v01.benchmark_v12 \
+  --model outputs/models/organism-v12-slot-organ-clean-smoke.pt \
+  --batches 48 \
+  --control-batches 24 \
+  --batch-size 16 \
+  --grid-size 12 \
+  --rollout-steps 96 \
+  --seed 51000 \
+  --report outputs/reports/benchmark-v12-slot-organ-clean-smoke.json
 ```
 
 Audit whether two generated assignment rules are input-identical but target-conflicting:
@@ -361,3 +376,9 @@ The experimental `sink_stabilized_rank` update adds lateral source/sink waves
 plus endpoint anchor channels. It fixes the source/sink rank-magnitude imbalance
 seen in v0.7 diagnostics, but the learned readout still does not generalize to
 reliable 3-pair uncued binding.
+
+The experimental `rank_slot_rule_cued` update adds explicit top/middle/bottom
+label slots and a global rule cue. In v0.12, those slots are seeded by separate
+vertical morphogen waves, then carried rightward through local tissue dynamics.
+This is the first mechanism here to pass the clean 3-pair reverse/cycle gate
+without pair route cues or stored answer tables.

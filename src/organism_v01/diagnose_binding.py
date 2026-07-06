@@ -106,7 +106,7 @@ def diagnose_binding(
         "hidden_cosine_matrix": mean_cosine_matrix(hidden_source, hidden_sink),
     }
     if model.update_rule == "rank_slot_rule_cued":
-        diagnostic_width = 18
+        diagnostic_width = 20
     elif model.update_rule in {"matching_readout", "rule_cued_matching_readout"}:
         diagnostic_width = 12
     else:

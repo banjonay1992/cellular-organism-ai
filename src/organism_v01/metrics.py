@@ -235,6 +235,48 @@ def rank_slot_accuracy(
     return float(torch.stack(correct_sets).float().mean().item())
 
 
+def rank_slot_routed_accuracy(
+    final_state: torch.Tensor,
+    batch: RoutingBatch,
+    layout: ChannelLayout,
+    *,
+    slot_offset: int = 12,
+    slot_count: int = 3,
+) -> float:
+    """Accuracy for the rank slot that each generated sink actually needs."""
+
+    if batch.pair_labels is None or batch.pair_sink_rc is None:
+        return 0.0
+    pair_count = batch.pair_labels.shape[1]
+    assignments = _rank_slot_assignments(pair_count, slot_count)
+    if not assignments:
+        return 0.0
+
+    slot_width = slot_count * layout.output_count
+    slot_start = layout.hidden_start + slot_offset
+    if layout.hidden_channels < slot_offset + slot_width:
+        return 0.0
+
+    pair_to_slots: dict[int, list[int]] = {}
+    for slot_index, pair_index in assignments:
+        pair_to_slots.setdefault(pair_index, []).append(slot_index)
+
+    slot_slice = slice(slot_start, slot_start + slot_width)
+    slot_logits = final_state[:, slot_slice]
+    correct_slots: list[torch.Tensor] = []
+    for item in range(final_state.shape[0]):
+        for pair_index, slot_indices in pair_to_slots.items():
+            row, col = [int(value) for value in batch.pair_sink_rc[item, pair_index]]
+            logits = slot_logits[item, :, row, col].view(slot_count, layout.output_count)
+            label = batch.pair_labels[item, pair_index]
+            for slot_index in slot_indices:
+                correct_slots.append(logits[slot_index].argmax(dim=0) == label)
+
+    if not correct_slots:
+        return 0.0
+    return float(torch.stack(correct_slots).float().mean().item())
+
+
 def compute_loss(
     final_state: torch.Tensor,
     batch: RoutingBatch,

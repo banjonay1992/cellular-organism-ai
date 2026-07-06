@@ -9,9 +9,9 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from organism_v01.channels import ChannelLayout
-from organism_v01.metrics import compute_loss
+from organism_v01.metrics import compute_loss, rank_slot_accuracy, rank_slot_routed_accuracy
 from organism_v01.organism import CellularOrganism
-from organism_v01.tasks import generate_memory_batch, generate_routing_batch
+from organism_v01.tasks import generate_memory_batch, generate_multi_pair_batch, generate_routing_batch
 
 
 class OrganismTests(unittest.TestCase):
@@ -279,6 +279,29 @@ class OrganismTests(unittest.TestCase):
         self.assertGreater(float(slot_energy), 0.0)
         self.assertTrue(torch.isfinite(losses["total"]))
         self.assertGreater(grad_norm, 0.0)
+
+    def test_rank_slot_rule_cued_forms_clean_three_pair_slot_organ(self) -> None:
+        torch.manual_seed(21)
+        layout = ChannelLayout(hidden_channels=32, rule_channels=1)
+        batch = generate_multi_pair_batch(
+            batch_size=16,
+            grid_size=12,
+            layout=layout,
+            pair_count=3,
+            sink_assignment="reverse",
+            damage_prob=0.0,
+            seed=125,
+        )
+        model = CellularOrganism(
+            layout=layout,
+            cell_hidden=16,
+            update_rule="rank_slot_rule_cued",
+        )
+
+        rollout = model(batch, steps=96)
+
+        self.assertGreaterEqual(rank_slot_accuracy(rollout.final_state, batch, layout), 0.70)
+        self.assertGreaterEqual(rank_slot_routed_accuracy(rollout.final_state, batch, layout), 0.90)
 
     def test_rollout_returns_frames_and_can_continue(self) -> None:
         torch.manual_seed(12)
