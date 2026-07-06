@@ -18,6 +18,7 @@ from organism_v01.train import (
     curriculum_batch_params,
     dynamic_injury_steps,
     load_initial_model,
+    scale_training_params,
     training_rollout,
 )
 
@@ -35,6 +36,45 @@ class TrainCurriculumTests(unittest.TestCase):
 
         self.assertEqual(args.dynamic_injury_prob, 0.2)
         self.assertEqual(dynamic_injury_steps(args), (7, 13))
+
+    def test_scale_training_params_cycle_in_two_step_blocks(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "--grid-size",
+                "12",
+                "--grid-size-choices",
+                "12,14",
+                "--rollout-steps",
+                "96",
+                "--rollout-steps-choices",
+                "96,112",
+                "--dynamic-injury-prob",
+                "0.1",
+            ]
+        )
+
+        first = scale_training_params(args, 1)
+        second = scale_training_params(args, 2)
+        third = scale_training_params(args, 3)
+        fourth = scale_training_params(args, 4)
+
+        self.assertEqual((first["grid_size"], first["rollout_steps"], first["pre_steps"]), (12, 96, 48))
+        self.assertEqual((second["grid_size"], second["rollout_steps"], second["pre_steps"]), (12, 96, 48))
+        self.assertEqual((third["grid_size"], third["rollout_steps"], third["pre_steps"]), (14, 112, 56))
+        self.assertEqual((fourth["grid_size"], fourth["rollout_steps"], fourth["pre_steps"]), (14, 112, 56))
+
+    def test_scale_training_params_rejects_mismatched_rollout_choices(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "--grid-size-choices",
+                "12,14,16",
+                "--rollout-steps-choices",
+                "96,112",
+            ]
+        )
+
+        with self.assertRaises(ValueError):
+            scale_training_params(args, 1)
 
     def test_training_rollout_applies_mid_rollout_injury_when_enabled(self) -> None:
         layout = ChannelLayout(hidden_channels=8)

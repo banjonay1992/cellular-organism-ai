@@ -150,6 +150,7 @@ These are run artifacts, not hardcoded scores:
 - Multi-pair v0.14 dynamic-injury recovery benchmark: promoted mid-rollout injury into a 3-pair reverse/cycle gate with recovery checkpoints and rank-slot diagnostics. Using the v0.13 10% static-damage checkpoint, a 48-step pre-injury / 48-step recovery run with 5% base damage plus 10% new mid-rollout injury passed. Reverse recovered from immediate `target_set_accuracy = 0.5364583333333334` to final `0.6145833333333334`; cycle recovered from `0.7447916666666666` to `0.9296875`. New blocked tissue was real: reverse/cycle newly blocked fractions were `0.06282552052289248 / 0.06150535323346654`.
 - Multi-pair v0.15 compounded-damage benchmark: added dynamic-injury training and a harder default benchmark with 10% base damage plus 10% new mid-rollout injury. The v0.13 checkpoint failed this gate at reverse dynamic `target_set_accuracy = 0.4791666666666667`. After a 450-step dynamic-injury continuation, the v0.15 checkpoint passed: reverse/cycle final dynamic `target_set_accuracy = 0.640625 / 0.9609375`, reverse/cycle routed slot accuracy `0.7986111069718996 / 0.79253472139438`, and reverse/cycle recovery deltas `0.07291666666666663 / 0.34635416666666663`.
 - Multi-pair v0.16 generalization audit: added a scenario matrix over unseen seeds, injury timing, injury severity, mild damage, and a larger 14x14 grid. The v0.15 checkpoint passed 5 of 6 scenarios. It passed baseline, early injury, late injury, mild damage, and higher injury. The only failure was larger-grid reverse: dynamic `target_set_accuracy = 0.4921875` in the 8-batch matrix and `0.484375` in a 16-batch confirmation run, just under the `0.50` gate. Larger-grid cycle passed at `0.875` / `0.90625`. This makes v0.17's target clear: randomized grid-size / scale-generalization recovery training.
+- Multi-pair v0.17 scale-generalized recovery: added scale-aware training choices so dynamic-injury training alternates 12x12/96-step and 14x14/112-step bodies in two-step blocks, ensuring reverse and cycle both see each scale. After a 500-step continuation from v0.15, the larger-grid reverse failure passed: 16-batch confirmation improved from `0.484375` to `0.80859375`. The full v0.16 matrix then passed 6 of 6 scenarios, with worst dynamic `target_set_accuracy = 0.765625`, mean dynamic `0.8951822916666666`, and larger-grid reverse/cycle `0.8125 / 0.953125`.
 
 Example 3-pair damaged training path:
 
@@ -358,6 +359,46 @@ PYTHONPATH=src python3 -m organism_v01.benchmark_v16 \
   --report outputs/reports/benchmark-v16-larger-grid-confirm.json
 ```
 
+Train the v0.17 scale-generalized recovery checkpoint:
+
+```bash
+PYTHONPATH=src python3 -m organism_v01.train \
+  --task multi \
+  --curriculum rule_binding_final \
+  --steps 500 \
+  --batch-size 16 \
+  --grid-size 12 \
+  --grid-size-choices 12,14 \
+  --rollout-steps 96 \
+  --rollout-steps-choices 96,112 \
+  --hidden-channels 32 \
+  --rule-channels 3 \
+  --cell-hidden 64 \
+  --update-rule rank_slot_rule_cued \
+  --damage-prob 0.10 \
+  --dynamic-injury-prob 0.10 \
+  --pair-count 3 \
+  --min-pair-spacing 1 \
+  --field-weight 0.5 \
+  --localization-weight 1.0 \
+  --slot-weight 0.1 \
+  --lr 0.00018 \
+  --seed 1017 \
+  --init-model outputs/models/organism-v15-dynamic010.pt \
+  --save-model outputs/models/organism-v17-scale.pt \
+  --report outputs/reports/train-v17-scale.json
+
+PYTHONPATH=src python3 -m organism_v01.benchmark_v16 \
+  --model outputs/models/organism-v17-scale.pt \
+  --batches 8 \
+  --batch-size 16 \
+  --grid-size 12 \
+  --rollout-steps 96 \
+  --scenarios all \
+  --seed 101600 \
+  --report outputs/reports/benchmark-v17-scale-generalization.json
+```
+
 Audit whether two generated assignment rules are input-identical but target-conflicting:
 
 ```bash
@@ -502,3 +543,8 @@ In v0.16, the benchmark stops asking only "did the trained condition pass?" and
 starts asking "where does recovery fail when conditions move?" The first answer
 is encouraging but specific: timing and severity generalize, while larger-grid
 reverse recovery needs scale-aware training.
+
+In v0.17, scale-aware training fixes that failure by varying both body size and
+rollout length during dynamic-injury training. Grid choices advance in two-step
+blocks so the alternating reverse/cycle curriculum sees both assignments at
+each scale instead of accidentally pairing one assignment with one grid size.

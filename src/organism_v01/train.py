@@ -32,7 +32,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--steps", type=int, default=450)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--grid-size", type=int, default=16)
+    parser.add_argument("--grid-size-choices", default=None)
     parser.add_argument("--rollout-steps", type=int, default=24)
+    parser.add_argument("--rollout-steps-choices", default=None)
     parser.add_argument("--hidden-channels", type=int, default=8)
     parser.add_argument("--route-channels", type=int, default=0)
     parser.add_argument("--rule-channels", type=int, default=0)
@@ -79,18 +81,54 @@ class TrainingRollout:
     post_steps: int
 
 
-def dynamic_injury_steps(args: argparse.Namespace) -> tuple[int, int]:
+def _parse_positive_int_choices(value: str | None, *, flag_name: str) -> tuple[int, ...]:
+    if value is None:
+        return ()
+    choices = tuple(int(part.strip()) for part in value.split(",") if part.strip())
+    if not choices:
+        raise ValueError(f"{flag_name} must include at least one integer")
+    if any(choice <= 0 for choice in choices):
+        raise ValueError(f"{flag_name} values must be positive")
+    return choices
+
+
+def dynamic_injury_steps(args: argparse.Namespace, *, rollout_steps: int | None = None) -> tuple[int, int]:
+    rollout_steps = int(args.rollout_steps if rollout_steps is None else rollout_steps)
     pre_steps = (
         int(args.dynamic_injury_pre_steps)
         if getattr(args, "dynamic_injury_pre_steps", None) is not None
-        else max(1, int(args.rollout_steps) // 2)
+        else max(1, rollout_steps // 2)
     )
-    post_steps = int(args.rollout_steps) - pre_steps
+    post_steps = rollout_steps - pre_steps
     if pre_steps <= 0:
         raise ValueError("--dynamic-injury-pre-steps must be positive")
     if post_steps <= 0:
         raise ValueError("--dynamic-injury-pre-steps must be less than --rollout-steps")
     return pre_steps, post_steps
+
+
+def scale_training_params(args: argparse.Namespace, step: int) -> dict[str, int]:
+    grid_choices = _parse_positive_int_choices(
+        getattr(args, "grid_size_choices", None),
+        flag_name="--grid-size-choices",
+    ) or (int(args.grid_size),)
+    rollout_choices = _parse_positive_int_choices(
+        getattr(args, "rollout_steps_choices", None),
+        flag_name="--rollout-steps-choices",
+    ) or (int(args.rollout_steps),)
+    if len(rollout_choices) not in {1, len(grid_choices)}:
+        raise ValueError("--rollout-steps-choices must have length 1 or match --grid-size-choices")
+
+    choice_index = ((step - 1) // 2) % len(grid_choices)
+    rollout_index = 0 if len(rollout_choices) == 1 else choice_index
+    rollout_steps = rollout_choices[rollout_index]
+    pre_steps, post_steps = dynamic_injury_steps(args, rollout_steps=rollout_steps)
+    return {
+        "grid_size": grid_choices[choice_index],
+        "rollout_steps": rollout_steps,
+        "pre_steps": pre_steps,
+        "post_steps": post_steps,
+    }
 
 
 def training_rollout(
@@ -101,24 +139,26 @@ def training_rollout(
     *,
     step: int,
     device: torch.device,
+    rollout_steps: int | None = None,
 ) -> TrainingRollout:
+    rollout_steps = int(args.rollout_steps if rollout_steps is None else rollout_steps)
     injury_prob = float(getattr(args, "dynamic_injury_prob", 0.0))
     if injury_prob <= 0.0:
-        rollout = model(batch, steps=args.rollout_steps)
+        rollout = model(batch, steps=rollout_steps)
         return TrainingRollout(
             final_state=rollout.final_state,
             loss_batch=batch,
             activity_loss=rollout.activity_loss,
             injury_applied=False,
             injury_prob=0.0,
-            pre_steps=args.rollout_steps,
+            pre_steps=rollout_steps,
             post_steps=0,
         )
 
     if not 0.0 <= injury_prob < 0.8:
         raise ValueError("--dynamic-injury-prob must be in [0.0, 0.8)")
 
-    pre_steps, post_steps = dynamic_injury_steps(args)
+    pre_steps, post_steps = dynamic_injury_steps(args, rollout_steps=rollout_steps)
     before_injury = model(batch, steps=pre_steps)
     injured = apply_random_injury(
         batch,
@@ -134,7 +174,7 @@ def training_rollout(
     )
     activity_loss = (
         before_injury.activity_loss * pre_steps + after_injury.activity_loss * post_steps
-    ) / int(args.rollout_steps)
+    ) / rollout_steps
     return TrainingRollout(
         final_state=after_injury.final_state,
         loss_batch=injured,
@@ -366,6 +406,7 @@ def main() -> None:
     else:
         dynamic_pre_steps = args.rollout_steps
         dynamic_post_steps = 0
+    scale_training_params(args, 1)
 
     device = choose_device(args.device)
     set_seed(args.seed)
@@ -447,10 +488,11 @@ def main() -> None:
     for step in range(1, args.steps + 1):
         model.train()
         batch_params = curriculum_batch_params(args, step)
+        scale_params = scale_training_params(args, step)
         batch = generate_task_batch(
             task=str(batch_params["task"]),
             batch_size=args.batch_size,
-            grid_size=args.grid_size,
+            grid_size=scale_params["grid_size"],
             layout=layout,
             damage_prob=float(batch_params["damage_prob"]),
             coordinate_fields=bool(batch_params["coordinate_fields"]),
@@ -468,6 +510,7 @@ def main() -> None:
             args,
             step=step,
             device=device,
+            rollout_steps=scale_params["rollout_steps"],
         )
         losses = compute_loss(
             rollout.final_state,
@@ -512,6 +555,8 @@ def main() -> None:
             margin = mean_sink_margin(rollout.final_state.detach(), rollout.loss_batch, layout)
             row = {
                 "step": step,
+                "train_grid_size": scale_params["grid_size"],
+                "train_rollout_steps": scale_params["rollout_steps"],
                 "train_pair_count": int(batch_params["pair_count"]),
                 "train_damage_prob": float(batch_params["damage_prob"]),
                 "train_sink_assignment": str(batch_params["sink_assignment"]),
@@ -589,7 +634,9 @@ def main() -> None:
             "steps": args.steps,
             "batch_size": args.batch_size,
             "grid_size": args.grid_size,
+            "grid_size_choices": args.grid_size_choices,
             "rollout_steps": args.rollout_steps,
+            "rollout_steps_choices": args.rollout_steps_choices,
             "hidden_channels": args.hidden_channels,
             "route_channels": args.route_channels,
             "rule_channels": args.rule_channels,
