@@ -37,6 +37,11 @@ class TrainCurriculumTests(unittest.TestCase):
         self.assertEqual(args.dynamic_injury_prob, 0.2)
         self.assertEqual(dynamic_injury_steps(args), (7, 13))
 
+    def test_parser_accepts_relative_rank_update_rule(self) -> None:
+        args = build_parser().parse_args(["--update-rule", "relative_rank_rule_cued"])
+
+        self.assertEqual(args.update_rule, "relative_rank_rule_cued")
+
     def test_scale_training_params_cycle_in_two_step_blocks(self) -> None:
         args = build_parser().parse_args(
             [

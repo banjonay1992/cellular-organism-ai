@@ -107,6 +107,8 @@ def diagnose_binding(
     }
     if model.update_rule == "rank_slot_rule_cued":
         diagnostic_width = 20
+    elif model.update_rule == "relative_rank_rule_cued":
+        diagnostic_width = 24
     elif model.update_rule in {"matching_readout", "rule_cued_matching_readout"}:
         diagnostic_width = 12
     else:

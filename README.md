@@ -153,6 +153,7 @@ These are run artifacts, not hardcoded scores:
 - Multi-pair v0.17 scale-generalized recovery: added scale-aware training choices so dynamic-injury training alternates 12x12/96-step and 14x14/112-step bodies in two-step blocks, ensuring reverse and cycle both see each scale. After a 500-step continuation from v0.15, the larger-grid reverse failure passed: 16-batch confirmation improved from `0.484375` to `0.80859375`. The full v0.16 matrix then passed 6 of 6 scenarios, with worst dynamic `target_set_accuracy = 0.765625`, mean dynamic `0.8951822916666666`, and larger-grid reverse/cycle `0.8125 / 0.953125`.
 - Multi-pair v0.18 four-pair probe: added a clean 4-pair dynamic-injury audit without changing the trained model or adding pair route cues. The fixed top/middle/bottom rank-slot diagnostics are now explicitly marked over-capacity for `pair_count = 4`, so the probe gates only live sink outputs and injury evidence. The v0.17 checkpoint did not pass the full probe because reverse finished at dynamic `target_set_accuracy = 0.3359375`, but the result exposed a useful surprise: cycle generalized strongly to four pairs, with static/dynamic `target_set_accuracy = 0.75390625 / 0.7578125`, dynamic `target_peak_accuracy = 0.9921875`, and real newly blocked tissue at `0.06391501822508872`.
 - Multi-pair v0.19 rank diagnostic: added a diagnostic-only assignment map for 4-pair aligned/cycle/reverse runs, including source-rank accuracy, sink-rank accuracy, margins, label bias, recovery curves, and exact counts of how many sinks were correct per item. The 16-batch result shows cycle is balanced across all ranks and still strong after injury: dynamic `target_set_accuracy = 0.76171875`, per-sink accuracy `0.93359375`, and all source ranks above `0.92`. Reverse is not failing uniformly: outer source ranks were `0.8984375 / 0.94921875`, but the two inner ranks were `0.59375 / 0.56640625`, leaving dynamic `target_set_accuracy = 0.390625`. This makes the next architecture target clear: separate middle ranks cleanly under the reverse transform.
+- Multi-pair v0.20 relative-rank/mirror experiment: added a `relative_rank_rule_cued` organ with source/sink count waves and source-label rank moments, so the body can represent more than top/middle/bottom without adding a fourth answer slot. A cold 300-step run proved the organ can form distinct four-rank coordinates, but was not competitive. The stronger branch continued from the v0.17 organism with 4-pair mirror training and no slot supervision. On the same v0.19 seed, reverse inner source ranks improved from `0.57421875 / 0.546875` to `0.66015625 / 0.7421875`; reverse dynamic `target_set_accuracy` improved from `0.3359375` to `0.39453125`, while cycle stayed usable at `0.75390625`. The v0.18 gate still fails because reverse static accuracy is only `0.36328125` against the `0.40` static gate, so v0.20 is progress, not a solved 4-pair organism.
 
 Example 3-pair damaged training path:
 
@@ -436,6 +437,76 @@ PYTHONPATH=src python3 -m organism_v01.benchmark_v19 \
   --report outputs/reports/benchmark-v19-four-pair-diagnostics.json
 ```
 
+Train and probe the v0.20 mirror continuation:
+
+```bash
+PYTHONPATH=src python3 -m organism_v01.train \
+  --task multi \
+  --curriculum rule_binding_final \
+  --steps 300 \
+  --batch-size 8 \
+  --grid-size 12 \
+  --grid-size-choices 12,14 \
+  --rollout-steps 96 \
+  --rollout-steps-choices 96,112 \
+  --hidden-channels 32 \
+  --rule-channels 3 \
+  --cell-hidden 64 \
+  --update-rule rank_slot_rule_cued \
+  --damage-prob 0.10 \
+  --dynamic-injury-prob 0.10 \
+  --pair-count 4 \
+  --min-pair-spacing 1 \
+  --field-weight 0.5 \
+  --localization-weight 1.0 \
+  --slot-weight 0.0 \
+  --lr 0.00012 \
+  --seed 1021 \
+  --init-model outputs/models/organism-v17-scale.pt \
+  --save-model outputs/models/organism-v20-mirror-finetune.pt \
+  --report outputs/reports/train-v20-mirror-finetune.json
+
+PYTHONPATH=src python3 -m organism_v01.train \
+  --task multi \
+  --curriculum none \
+  --steps 200 \
+  --batch-size 8 \
+  --grid-size 14 \
+  --rollout-steps 112 \
+  --hidden-channels 32 \
+  --rule-channels 3 \
+  --cell-hidden 64 \
+  --update-rule rank_slot_rule_cued \
+  --damage-prob 0.10 \
+  --dynamic-injury-prob 0.10 \
+  --dynamic-injury-pre-steps 56 \
+  --pair-count 4 \
+  --min-pair-spacing 1 \
+  --sink-assignment reverse \
+  --field-weight 0.5 \
+  --localization-weight 1.0 \
+  --slot-weight 0.0 \
+  --lr 0.00008 \
+  --seed 1022 \
+  --init-model outputs/models/organism-v20-mirror-finetune.pt \
+  --save-model outputs/models/organism-v20-reverse-polish.pt \
+  --report outputs/reports/train-v20-reverse-polish.json
+
+PYTHONPATH=src python3 -m organism_v01.benchmark_v19 \
+  --model outputs/models/organism-v20-reverse-polish.pt \
+  --batches 16 \
+  --batch-size 16 \
+  --grid-size 14 \
+  --rollout-steps 112 \
+  --pre-steps 56 \
+  --damage-prob 0.10 \
+  --injury-prob 0.10 \
+  --pair-count 4 \
+  --assignments aligned,cycle,reverse \
+  --seed 112100 \
+  --report outputs/reports/benchmark-v20-reverse-polish-diagnostics.json
+```
+
 Audit whether two generated assignment rules are input-identical but target-conflicting:
 
 ```bash
@@ -598,3 +669,12 @@ ranks mostly intact but confuses the two inner ranks, while four-pair cycle is
 balanced across every source and sink rank. The next scalable organ should
 therefore represent relative rank with enough resolution to distinguish inner
 positions under mirror-like transforms, not just add another fixed answer slot.
+
+In v0.20, `relative_rank_rule_cued` adds that representation directly: count
+waves produce continuous source/sink rank coordinates, and label-moment channels
+carry rank-indexed source labels across the body. The cold-start organ is not
+yet competitive, which suggests the successful 3-pair organism has learned
+useful dynamics that should not be thrown away. A mirror-focused continuation
+from v0.17 improves the measured inner-rank failure, but still leaves too many
+items with exactly one wrong sink. The next target is converting that per-rank
+improvement into full-item consistency.

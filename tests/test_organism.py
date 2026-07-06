@@ -331,6 +331,69 @@ class OrganismTests(unittest.TestCase):
         self.assertGreater(float(valid_output_energy), 0.0)
         self.assertLess(float(blank_output_energy), float(valid_output_energy) * 0.5)
 
+    def test_relative_rank_rule_cued_separates_four_source_ranks(self) -> None:
+        torch.manual_seed(23)
+        layout = ChannelLayout(hidden_channels=32, rule_channels=3)
+        batch = generate_multi_pair_batch(
+            batch_size=8,
+            grid_size=14,
+            layout=layout,
+            pair_count=4,
+            sink_assignment="reverse",
+            damage_prob=0.0,
+            seed=127,
+        )
+        model = CellularOrganism(
+            layout=layout,
+            cell_hidden=16,
+            update_rule="relative_rank_rule_cued",
+        )
+
+        rollout = model(batch, steps=96)
+        losses = compute_loss(
+            rollout.final_state,
+            batch,
+            layout,
+            activity_loss=rollout.activity_loss,
+        )
+        losses["total"].backward()
+        grad_norm = sum(
+            float(parameter.grad.abs().sum())
+            for parameter in model.parameters()
+            if parameter.grad is not None
+        )
+        assert batch.pair_source_rc is not None
+        source_coordinates = []
+        for rank_index in range(4):
+            values = []
+            for item in range(batch.initial.shape[0]):
+                row, col = [int(value) for value in batch.pair_source_rc[item, rank_index]]
+                down = rollout.final_state[item, layout.hidden_start + 12, row, col]
+                up = rollout.final_state[item, layout.hidden_start + 13, row, col]
+                values.append((down - up) / (down + up).clamp_min(1.0))
+            source_coordinates.append(float(torch.stack(values).mean().detach()))
+        moment_channels = slice(layout.hidden_start + 16, layout.hidden_start + 24)
+        moment_energy = (rollout.final_state[:, moment_channels] * batch.sink_mask).detach().abs().sum()
+
+        self.assertTrue(torch.allclose(rollout.final_state[:, : layout.env_count], batch.env))
+        self.assertLess(source_coordinates[0], source_coordinates[1])
+        self.assertLess(source_coordinates[1], source_coordinates[2])
+        self.assertLess(source_coordinates[2], source_coordinates[3])
+        self.assertGreater(source_coordinates[2] - source_coordinates[1], 0.05)
+        self.assertGreater(float(moment_energy), 0.0)
+        self.assertTrue(torch.isfinite(losses["total"]))
+        self.assertGreater(grad_norm, 0.0)
+
+    def test_relative_rank_rule_cued_requires_rule_channels(self) -> None:
+        layout = ChannelLayout(hidden_channels=32)
+
+        with self.assertRaises(ValueError):
+            CellularOrganism(
+                layout=layout,
+                cell_hidden=16,
+                update_rule="relative_rank_rule_cued",
+            )
+
     def test_rollout_returns_frames_and_can_continue(self) -> None:
         torch.manual_seed(12)
         layout = ChannelLayout(hidden_channels=4)

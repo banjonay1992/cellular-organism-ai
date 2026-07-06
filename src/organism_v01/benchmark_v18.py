@@ -19,6 +19,7 @@ V18_THRESHOLDS = {
 
 ASSIGNMENTS = ("reverse", "cycle")
 RANK_SLOT_CAPACITY = 3
+SUPPORTED_UPDATE_RULES = {"rank_slot_rule_cued", "relative_rank_rule_cued"}
 
 
 def summarize_assignment(
@@ -123,8 +124,8 @@ def main() -> None:
     device = choose_device(args.device)
     set_seed(args.seed)
     model, layout, checkpoint_args = load_model(args.model, device)
-    if checkpoint_args.get("update_rule") != "rank_slot_rule_cued":
-        raise ValueError("v0.18 benchmark requires update_rule=rank_slot_rule_cued")
+    if checkpoint_args.get("update_rule") not in SUPPORTED_UPDATE_RULES:
+        raise ValueError("v0.18 benchmark requires a rule-cued rank update rule")
     if layout.rule_channels < 3:
         raise ValueError("v0.18 benchmark requires one-hot rule cue with rule_channels >= 3")
 
