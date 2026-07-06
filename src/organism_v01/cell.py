@@ -779,6 +779,237 @@ class RankSlotRuleCuedCellUpdate(nn.Module):
         return delta
 
 
+class RankSlotRepairRuleCuedCellUpdate(RankSlotRuleCuedCellUpdate):
+    """Rank-slot organ with a recurrent sink/source repair bus.
+
+    The base rank-slot organ makes each sink decision locally from the rank
+    waves. This variant reserves four hidden channels as a tiny repair loop:
+    sinks broadcast their current label vote leftward, and sources answer
+    rightward with label-carrying repair signals. The learned sink readout can
+    then use the shared repair state to resolve item-level inconsistencies.
+    """
+
+    def __init__(
+        self,
+        channels: int,
+        *,
+        hidden_start: int,
+        hidden_channels: int,
+        source_a: int,
+        source_b: int,
+        sink: int,
+        output_start: int,
+        rule_start: int,
+        rule_channels: int,
+        hidden: int = 64,
+    ) -> None:
+        if hidden_channels < 24:
+            raise ValueError("rank_slot_repair_rule_cued requires at least 24 hidden channels")
+        super().__init__(
+            channels,
+            hidden_start=hidden_start,
+            hidden_channels=hidden_channels,
+            source_a=source_a,
+            source_b=source_b,
+            sink=sink,
+            output_start=output_start,
+            rule_start=rule_start,
+            rule_channels=rule_channels,
+            hidden=hidden,
+        )
+
+        self.repair_start = hidden_start + 20
+        self.sink_vote_a = hidden_start + 20
+        self.sink_vote_b = hidden_start + 21
+        self.source_repair_a = hidden_start + 22
+        self.source_repair_b = hidden_start + 23
+        self.repair_channels = 4
+        self.repair_match = nn.Sequential(
+            nn.Conv2d(self.organ_channels + self.repair_channels + 2 + rule_channels, 56, kernel_size=1),
+            nn.SiLU(),
+            nn.Conv2d(56, 2, kernel_size=1),
+        )
+
+        sink_vote_kernel = torch.zeros(1, 1, 3, 3)
+        sink_vote_kernel[0, 0, 1, 2] = 0.56
+        sink_vote_kernel[0, 0, 0, 2] = 0.13
+        sink_vote_kernel[0, 0, 2, 2] = 0.13
+        sink_vote_kernel[0, 0, 0, 1] = 0.06
+        sink_vote_kernel[0, 0, 2, 1] = 0.06
+        sink_vote_kernel[0, 0, 1, 1] = 0.06
+        source_reply_kernel = torch.zeros(1, 1, 3, 3)
+        source_reply_kernel[0, 0, 1, 0] = 0.56
+        source_reply_kernel[0, 0, 0, 0] = 0.13
+        source_reply_kernel[0, 0, 2, 0] = 0.13
+        source_reply_kernel[0, 0, 0, 1] = 0.06
+        source_reply_kernel[0, 0, 2, 1] = 0.06
+        source_reply_kernel[0, 0, 1, 1] = 0.06
+        consensus_kernel = torch.zeros(1, 1, 3, 3)
+        consensus_kernel[0, 0, 1, 1] = 0.50
+        consensus_kernel[0, 0, 0, 1] = 0.20
+        consensus_kernel[0, 0, 2, 1] = 0.20
+        consensus_kernel[0, 0, 1, 0] = 0.05
+        consensus_kernel[0, 0, 1, 2] = 0.05
+        self.register_buffer("sink_vote_kernel", sink_vote_kernel)
+        self.register_buffer("source_reply_kernel", source_reply_kernel)
+        self.register_buffer("repair_consensus_kernel", consensus_kernel)
+
+        final_repair = self.repair_match[-1]
+        if isinstance(final_repair, nn.Conv2d):
+            nn.init.zeros_(final_repair.weight)
+            nn.init.zeros_(final_repair.bias)
+
+    @staticmethod
+    def _repair_propagate(
+        wave: torch.Tensor,
+        seed: torch.Tensor,
+        kernel: torch.Tensor,
+        consensus_kernel: torch.Tensor,
+    ) -> torch.Tensor:
+        carried = torch.nn.functional.conv2d(wave, kernel, padding=1)
+        consensus = torch.nn.functional.conv2d(wave, consensus_kernel, padding=1)
+        return (seed + carried * 0.78 + consensus * 0.20).clamp(-4.0, 4.0)
+
+    def forward(self, state: torch.Tensor) -> torch.Tensor:
+        source_a_marker = state[:, self.source_a : self.source_a + 1].clamp(0.0, 1.0)
+        source_b_marker = state[:, self.source_b : self.source_b + 1].clamp(0.0, 1.0)
+        source_marker = (source_a_marker + source_b_marker).clamp(0.0, 1.0)
+        sink_marker = state[:, self.sink : self.sink + 1].clamp(0.0, 1.0)
+        match_slice = slice(self.match_start, self.match_start + self.organ_channels)
+        match_features = state[:, match_slice]
+        repair_slice = slice(self.repair_start, self.repair_start + self.repair_channels)
+        repair_features = state[:, repair_slice]
+
+        source_down_state = state[:, self.source_down : self.source_down + 1]
+        source_up_state = state[:, self.source_up : self.source_up + 1]
+        sink_down_state = state[:, self.sink_down : self.sink_down + 1]
+        sink_up_state = state[:, self.sink_up : self.sink_up + 1]
+        source_at_sink_down_state = state[:, self.source_at_sink_down : self.source_at_sink_down + 1]
+        source_at_sink_up_state = state[:, self.source_at_sink_up : self.source_at_sink_up + 1]
+        sink_at_source_down_state = state[:, self.sink_at_source_down : self.sink_at_source_down + 1]
+        sink_at_source_up_state = state[:, self.sink_at_source_up : self.sink_at_source_up + 1]
+        source_a_down_state = state[:, self.source_a_down : self.source_a_down + 1]
+        source_a_up_state = state[:, self.source_a_up : self.source_a_up + 1]
+        source_b_down_state = state[:, self.source_b_down : self.source_b_down + 1]
+        source_b_up_state = state[:, self.source_b_up : self.source_b_up + 1]
+        rank_down_state = state[:, self.rank_down : self.rank_down + 1]
+        rank_up_state = state[:, self.rank_up : self.rank_up + 1]
+
+        perceived = self.perception(state)
+        match_context = self.match_read(match_features)
+        readout = self.readout(torch.cat([perceived, match_context], dim=1))
+        delta = self.delta(readout) * torch.sigmoid(self.update_gate(readout))
+
+        source_down_target = self._propagate(source_down_state, self.source_down_kernel, source_marker)
+        source_up_target = self._propagate(source_up_state, self.source_up_kernel, source_marker)
+        sink_down_target = self._propagate(sink_down_state, self.sink_down_kernel, sink_marker)
+        sink_up_target = self._propagate(sink_up_state, self.sink_up_kernel, sink_marker)
+        source_a_down_target = self._propagate(source_a_down_state, self.source_down_kernel, source_a_marker)
+        source_a_up_target = self._propagate(source_a_up_state, self.source_up_kernel, source_a_marker)
+        source_b_down_target = self._propagate(source_b_down_state, self.source_down_kernel, source_b_marker)
+        source_b_up_target = self._propagate(source_b_up_state, self.source_up_kernel, source_b_marker)
+        rank_down_target = self._vertical_propagate(rank_down_state, self.vertical_down_kernel, source_marker)
+        rank_up_target = self._vertical_propagate(rank_up_state, self.vertical_up_kernel, source_marker)
+
+        above = torch.nn.functional.conv2d(rank_down_state, self.vertical_down_kernel, padding=1).clamp_min(0.0)
+        below = torch.nn.functional.conv2d(rank_up_state, self.vertical_up_kernel, padding=1).clamp_min(0.0)
+        has_above = torch.sigmoid((above - 0.12) * 16.0)
+        has_below = torch.sigmoid((below - 0.12) * 16.0)
+        no_above = 1.0 - has_above
+        no_below = 1.0 - has_below
+        isolated_seed = no_above * no_below * 0.12
+        top_seed = source_marker * no_above * (has_below + isolated_seed)
+        bottom_seed = source_marker * no_below * (has_above + isolated_seed)
+        middle_seed = source_marker * has_above * has_below
+
+        slot_targets = [
+            self._slot_propagate(state[:, self.top_a : self.top_a + 1], top_seed * source_a_marker),
+            self._slot_propagate(state[:, self.top_b : self.top_b + 1], top_seed * source_b_marker),
+            self._slot_propagate(state[:, self.middle_a : self.middle_a + 1], middle_seed * source_a_marker),
+            self._slot_propagate(state[:, self.middle_b : self.middle_b + 1], middle_seed * source_b_marker),
+            self._slot_propagate(state[:, self.bottom_a : self.bottom_a + 1], bottom_seed * source_a_marker),
+            self._slot_propagate(state[:, self.bottom_b : self.bottom_b + 1], bottom_seed * source_b_marker),
+        ]
+        wave_targets = torch.cat(
+            [
+                source_down_target,
+                source_up_target,
+                sink_down_target,
+                sink_up_target,
+                self._anchor_target(source_at_sink_down_state, source_down_target, sink_marker),
+                self._anchor_target(source_at_sink_up_state, source_up_target, sink_marker),
+                self._anchor_target(sink_at_source_down_state, sink_down_target, source_marker),
+                self._anchor_target(sink_at_source_up_state, sink_up_target, source_marker),
+                source_a_down_target,
+                source_a_up_target,
+                source_b_down_target,
+                source_b_up_target,
+                *slot_targets,
+                rank_down_target,
+                rank_up_target,
+            ],
+            dim=1,
+        )
+        wave_delta = (wave_targets - match_features) * 0.40
+
+        rule_context = state[:, self.rule_start : self.rule_start + self.rule_channels]
+        base_local_output = self.local_match(torch.cat([wave_targets, rule_context], dim=1)) * sink_marker
+        current_output = torch.tanh(state[:, self.output_start : self.output_start + 2] + base_local_output)
+        sink_vote_a_state = state[:, self.sink_vote_a : self.sink_vote_a + 1]
+        sink_vote_b_state = state[:, self.sink_vote_b : self.sink_vote_b + 1]
+        source_repair_a_state = state[:, self.source_repair_a : self.source_repair_a + 1]
+        source_repair_b_state = state[:, self.source_repair_b : self.source_repair_b + 1]
+        sink_vote_a_target = self._repair_propagate(
+            sink_vote_a_state,
+            current_output[:, 0:1] * sink_marker,
+            self.sink_vote_kernel,
+            self.repair_consensus_kernel,
+        )
+        sink_vote_b_target = self._repair_propagate(
+            sink_vote_b_state,
+            current_output[:, 1:2] * sink_marker,
+            self.sink_vote_kernel,
+            self.repair_consensus_kernel,
+        )
+        incoming_vote = (sink_vote_a_state.abs() + sink_vote_b_state.abs()).clamp(0.0, 1.0)
+        source_repair_a_target = self._repair_propagate(
+            source_repair_a_state,
+            source_a_marker * incoming_vote,
+            self.source_reply_kernel,
+            self.repair_consensus_kernel,
+        )
+        source_repair_b_target = self._repair_propagate(
+            source_repair_b_state,
+            source_b_marker * incoming_vote,
+            self.source_reply_kernel,
+            self.repair_consensus_kernel,
+        )
+        repair_targets = torch.cat(
+            [
+                sink_vote_a_target,
+                sink_vote_b_target,
+                source_repair_a_target,
+                source_repair_b_target,
+            ],
+            dim=1,
+        )
+        repair_delta = (repair_targets - repair_features) * 0.38
+        repair_output = self.repair_match(
+            torch.cat([wave_targets, repair_features, current_output * sink_marker, rule_context], dim=1)
+        ) * sink_marker
+
+        output_delta = base_local_output + repair_output
+        if self.rule_channels > 1:
+            rule_presence = rule_context.sum(dim=1, keepdim=True).clamp(0.0, 1.0)
+            output_delta = (delta[:, self.output_start : self.output_start + 2] + output_delta) * rule_presence
+
+        delta = delta.clone()
+        delta[:, match_slice] = wave_delta
+        delta[:, repair_slice] = repair_delta
+        delta[:, self.output_start : self.output_start + 2] = output_delta
+        return delta
+
+
 class RelativeRankRuleCuedCellUpdate(nn.Module):
     """Rule-cued readout with scalable relative-rank label moments."""
 
@@ -1025,5 +1256,6 @@ UPDATE_RULES = (
     "matching_readout",
     "rule_cued_matching_readout",
     "rank_slot_rule_cued",
+    "rank_slot_repair_rule_cued",
     "relative_rank_rule_cued",
 )

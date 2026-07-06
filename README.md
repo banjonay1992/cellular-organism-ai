@@ -155,6 +155,7 @@ These are run artifacts, not hardcoded scores:
 - Multi-pair v0.19 rank diagnostic: added a diagnostic-only assignment map for 4-pair aligned/cycle/reverse runs, including source-rank accuracy, sink-rank accuracy, margins, label bias, recovery curves, and exact counts of how many sinks were correct per item. The 16-batch result shows cycle is balanced across all ranks and still strong after injury: dynamic `target_set_accuracy = 0.76171875`, per-sink accuracy `0.93359375`, and all source ranks above `0.92`. Reverse is not failing uniformly: outer source ranks were `0.8984375 / 0.94921875`, but the two inner ranks were `0.59375 / 0.56640625`, leaving dynamic `target_set_accuracy = 0.390625`. This makes the next architecture target clear: separate middle ranks cleanly under the reverse transform.
 - Multi-pair v0.20 relative-rank/mirror experiment: added a `relative_rank_rule_cued` organ with source/sink count waves and source-label rank moments, so the body can represent more than top/middle/bottom without adding a fourth answer slot. A cold 300-step run proved the organ can form distinct four-rank coordinates, but was not competitive. The stronger branch continued from the v0.17 organism with 4-pair mirror training and no slot supervision. On the same v0.19 seed, reverse inner source ranks improved from `0.57421875 / 0.546875` to `0.66015625 / 0.7421875`; reverse dynamic `target_set_accuracy` improved from `0.3359375` to `0.39453125`, while cycle stayed usable at `0.75390625`. The v0.18 gate still fails because reverse static accuracy is only `0.36328125` against the `0.40` static gate, so v0.20 is progress, not a solved 4-pair organism.
 - Multi-pair v0.21 consistency objective: added a worst-sink consistency loss that penalizes each generated item's weakest correct-vs-wrong sink margin, targeting the common "3 of 4 sinks right" failure directly. The objective is tested and trainable through `--consistency-weight` / `--consistency-margin`, but it did not solve four-pair reverse by itself. A mixed continuation from v0.20 improved cycle dynamic `target_set_accuracy` to `0.828125`, but reverse dynamic stayed at `0.3828125` versus the v0.20 same-seed `0.39453125`, with `44.921875%` of items still landing at exactly 3 correct sinks. Reverse-only and static-reverse continuations also failed the v0.18 gate; the static-reverse branch ended at reverse static/dynamic `0.37109375 / 0.35546875`, while cycle stayed `0.71484375 / 0.71875`. The result is useful: local margin pressure can sharpen an easier rule, but the reverse wall is a coordinated rank-binding error, not just weak sink logits.
+- Multi-pair v0.22 repair-bus experiment: added `rank_slot_repair_rule_cued`, which keeps the rank-slot organ but reserves four hidden channels for a recurrent sink/source repair loop. Sinks broadcast their current A/B vote leftward, sources answer rightward with label repair signals, and a new repair readout can be trained either with the whole organism or alone through `--train-repair-only`. The mechanism is alive and tested, but this version does not solve four-pair reverse. Mixed repair training reached reverse static/dynamic `0.3984375 / 0.37109375` and cycle dynamic `0.79296875`; reverse-only repair reached reverse dynamic `0.3671875`; repair-only training preserved the base more cleanly but reached only `0.359375`. The lesson is sharper: a feedback bus is not enough if its messages are just label votes. The next organ probably needs explicit permutation/assignment state, where sinks negotiate which source rank they claim, not only which label they currently believe.
 
 Example 3-pair damaged training path:
 
@@ -554,6 +555,79 @@ PYTHONPATH=src python3 -m organism_v01.benchmark_v19 \
   --report outputs/reports/benchmark-v21-consistency-diagnostics.json
 ```
 
+Train and probe the v0.22 repair bus:
+
+```bash
+PYTHONPATH=src python3 -m organism_v01.train \
+  --task multi \
+  --curriculum rule_binding_final \
+  --steps 260 \
+  --batch-size 8 \
+  --grid-size 12 \
+  --grid-size-choices 12,14 \
+  --rollout-steps 96 \
+  --rollout-steps-choices 96,112 \
+  --hidden-channels 32 \
+  --rule-channels 3 \
+  --cell-hidden 64 \
+  --update-rule rank_slot_repair_rule_cued \
+  --damage-prob 0.10 \
+  --dynamic-injury-prob 0.10 \
+  --pair-count 4 \
+  --min-pair-spacing 1 \
+  --field-weight 0.5 \
+  --localization-weight 1.0 \
+  --consistency-weight 0.20 \
+  --consistency-margin 1.0 \
+  --lr 0.00007 \
+  --seed 1026 \
+  --init-model outputs/models/organism-v20-reverse-polish.pt \
+  --save-model outputs/models/organism-v22-repair.pt \
+  --report outputs/reports/train-v22-repair.json
+
+PYTHONPATH=src python3 -m organism_v01.train \
+  --task multi \
+  --curriculum none \
+  --steps 260 \
+  --batch-size 8 \
+  --grid-size 14 \
+  --rollout-steps 112 \
+  --hidden-channels 32 \
+  --rule-channels 3 \
+  --cell-hidden 64 \
+  --update-rule rank_slot_repair_rule_cued \
+  --train-repair-only \
+  --damage-prob 0.10 \
+  --dynamic-injury-prob 0.10 \
+  --dynamic-injury-pre-steps 56 \
+  --pair-count 4 \
+  --min-pair-spacing 1 \
+  --sink-assignment reverse \
+  --field-weight 0.5 \
+  --localization-weight 1.0 \
+  --consistency-weight 0.25 \
+  --consistency-margin 1.0 \
+  --lr 0.0008 \
+  --seed 1028 \
+  --init-model outputs/models/organism-v20-reverse-polish.pt \
+  --save-model outputs/models/organism-v22-repair-only.pt \
+  --report outputs/reports/train-v22-repair-only.json
+
+PYTHONPATH=src python3 -m organism_v01.benchmark_v19 \
+  --model outputs/models/organism-v22-repair.pt \
+  --batches 16 \
+  --batch-size 16 \
+  --grid-size 14 \
+  --rollout-steps 112 \
+  --pre-steps 56 \
+  --damage-prob 0.10 \
+  --injury-prob 0.10 \
+  --pair-count 4 \
+  --assignments aligned,cycle,reverse \
+  --seed 112100 \
+  --report outputs/reports/benchmark-v22-repair-diagnostics.json
+```
+
 Audit whether two generated assignment rules are input-identical but target-conflicting:
 
 ```bash
@@ -733,3 +807,10 @@ pressure alone does not coordinate the four sink decisions under reverse. The
 next useful change should probably add an item-level repair or verifier loop
 that lets sinks resolve a shared rank assignment, rather than asking each sink
 to become more confident independently.
+
+In v0.22, that repair loop exists as state, not just loss: sink votes and source
+replies move through reserved hidden channels and can be used by a repair
+readout. The failed result says the content of the message matters. Label-vote
+feedback tends to reinforce local beliefs, while the unsolved reverse case
+needs shared assignment state: a sink should communicate "I claim source rank
+2" or "rank 1 and rank 2 conflict", not merely "I think the answer is A".

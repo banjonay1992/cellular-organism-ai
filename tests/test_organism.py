@@ -331,6 +331,57 @@ class OrganismTests(unittest.TestCase):
         self.assertGreater(float(valid_output_energy), 0.0)
         self.assertLess(float(blank_output_energy), float(valid_output_energy) * 0.5)
 
+    def test_rank_slot_repair_rule_cued_builds_repair_bus_and_backpropagates(self) -> None:
+        torch.manual_seed(24)
+        layout = ChannelLayout(hidden_channels=32, rule_channels=3)
+        batch = generate_multi_pair_batch(
+            batch_size=4,
+            grid_size=12,
+            layout=layout,
+            pair_count=4,
+            sink_assignment="reverse",
+            damage_prob=0.0,
+            seed=128,
+        )
+        model = CellularOrganism(
+            layout=layout,
+            cell_hidden=16,
+            update_rule="rank_slot_repair_rule_cued",
+        )
+
+        rollout = model(batch, steps=32)
+        losses = compute_loss(
+            rollout.final_state,
+            batch,
+            layout,
+            activity_loss=rollout.activity_loss,
+        )
+        losses["total"].backward()
+        grad_norm = sum(
+            float(parameter.grad.abs().sum())
+            for parameter in model.parameters()
+            if parameter.grad is not None
+        )
+        repair_channels = slice(layout.hidden_start + 20, layout.hidden_start + 24)
+        repair_energy = rollout.final_state[:, repair_channels].detach().abs().sum()
+        sink_repair_energy = (rollout.final_state[:, repair_channels] * batch.sink_mask).detach().abs().sum()
+
+        self.assertTrue(torch.allclose(rollout.final_state[:, : layout.env_count], batch.env))
+        self.assertGreater(float(repair_energy), 0.0)
+        self.assertGreater(float(sink_repair_energy), 0.0)
+        self.assertTrue(torch.isfinite(losses["total"]))
+        self.assertGreater(grad_norm, 0.0)
+
+    def test_rank_slot_repair_rule_cued_requires_repair_channels(self) -> None:
+        layout = ChannelLayout(hidden_channels=20, rule_channels=3)
+
+        with self.assertRaises(ValueError):
+            CellularOrganism(
+                layout=layout,
+                cell_hidden=16,
+                update_rule="rank_slot_repair_rule_cued",
+            )
+
     def test_relative_rank_rule_cued_separates_four_source_ranks(self) -> None:
         torch.manual_seed(23)
         layout = ChannelLayout(hidden_channels=32, rule_channels=3)

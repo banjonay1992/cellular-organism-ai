@@ -26,6 +26,9 @@ from organism_v01.organism import CellularOrganism
 from organism_v01.tasks import SINK_ASSIGNMENTS, TASK_NAMES, RoutingBatch, generate_task_batch
 
 CURRICULA = ("none", "multi_pair", "binding", "rule_binding", "rule_binding_damage", "rule_binding_final")
+COMPATIBLE_UPDATE_RULE_LOADS = {
+    ("rank_slot_rule_cued", "rank_slot_repair_rule_cued"),
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -60,6 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--slot-weight", type=float, default=0.0)
     parser.add_argument("--consistency-weight", type=float, default=0.0)
     parser.add_argument("--consistency-margin", type=float, default=1.0)
+    parser.add_argument("--train-repair-only", action="store_true")
     parser.add_argument("--dynamic-injury-prob", type=float, default=0.0)
     parser.add_argument("--dynamic-injury-pre-steps", type=int, default=None)
     parser.add_argument("--lr", type=float, default=2e-3)
@@ -380,7 +384,8 @@ def load_initial_model(
             f"init checkpoint rule_channels={checkpoint_rule_channels} "
             f"does not match requested {expected_rule_channels}"
         )
-    if checkpoint_update_rule != expected_update_rule:
+    compatible_rule_load = (checkpoint_update_rule, expected_update_rule) in COMPATIBLE_UPDATE_RULE_LOADS
+    if checkpoint_update_rule != expected_update_rule and not compatible_rule_load:
         raise ValueError(
             f"init checkpoint update_rule={checkpoint_update_rule} "
             f"does not match requested {expected_update_rule}"
@@ -395,7 +400,30 @@ def load_initial_model(
             f"init checkpoint tag_slots={checkpoint_tag_slots} "
             f"does not match requested {expected_tag_slots}"
         )
-    model.load_state_dict(checkpoint["model_state_dict"])
+    checkpoint_state = checkpoint["model_state_dict"]
+    if compatible_rule_load:
+        model_state = model.state_dict()
+        compatible_state = {
+            key: value
+            for key, value in checkpoint_state.items()
+            if key in model_state and tuple(model_state[key].shape) == tuple(value.shape)
+        }
+        model.load_state_dict(compatible_state, strict=False)
+        return
+
+    model.load_state_dict(checkpoint_state)
+
+
+def freeze_non_repair_parameters(model: CellularOrganism) -> int:
+    trainable_count = 0
+    for name, parameter in model.named_parameters():
+        should_train = "repair" in name
+        parameter.requires_grad_(should_train)
+        if should_train:
+            trainable_count += parameter.numel()
+    if trainable_count == 0:
+        raise ValueError("--train-repair-only requires repair parameters")
+    return trainable_count
 
 
 def main() -> None:
@@ -438,7 +466,12 @@ def main() -> None:
         expected_message_slots=args.message_slots,
         expected_tag_slots=args.tag_slots,
     )
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    trainable_parameter_count = None
+    if args.train_repair_only:
+        if args.update_rule != "rank_slot_repair_rule_cued":
+            raise ValueError("--train-repair-only requires --update-rule rank_slot_repair_rule_cued")
+        trainable_parameter_count = freeze_non_repair_parameters(model)
+    optimizer = torch.optim.AdamW((parameter for parameter in model.parameters() if parameter.requires_grad), lr=args.lr)
 
     baseline_metrics = evaluate_model(
         model,
@@ -675,6 +708,8 @@ def main() -> None:
             "slot_weight": args.slot_weight,
             "consistency_weight": args.consistency_weight,
             "consistency_margin": args.consistency_margin,
+            "train_repair_only": args.train_repair_only,
+            "trainable_parameter_count": trainable_parameter_count,
             "dynamic_injury_prob": args.dynamic_injury_prob,
             "dynamic_injury_pre_steps": args.dynamic_injury_pre_steps,
             "lr": args.lr,

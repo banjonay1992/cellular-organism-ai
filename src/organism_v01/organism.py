@@ -11,6 +11,7 @@ from organism_v01.cell import (
     GatedMessageCellUpdate,
     MatchingReadoutCellUpdate,
     RankBindingCellUpdate,
+    RankSlotRepairRuleCuedCellUpdate,
     RankSlotRuleCuedCellUpdate,
     RelativeRankRuleCuedCellUpdate,
     RuleCuedMatchingReadoutCellUpdate,
@@ -129,6 +130,19 @@ class CellularOrganism(nn.Module):
             )
         elif update_rule == "rank_slot_rule_cued":
             self.cell_update = RankSlotRuleCuedCellUpdate(
+                layout.total_channels,
+                hidden_start=layout.hidden_start,
+                hidden_channels=layout.hidden_channels,
+                source_a=layout.source_a,
+                source_b=layout.source_b,
+                sink=layout.sink,
+                output_start=layout.output_start,
+                rule_start=layout.rule_start,
+                rule_channels=layout.rule_channels,
+                hidden=cell_hidden,
+            )
+        elif update_rule == "rank_slot_repair_rule_cued":
+            self.cell_update = RankSlotRepairRuleCuedCellUpdate(
                 layout.total_channels,
                 hidden_start=layout.hidden_start,
                 hidden_channels=layout.hidden_channels,

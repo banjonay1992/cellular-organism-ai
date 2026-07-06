@@ -19,7 +19,7 @@ V18_THRESHOLDS = {
 
 ASSIGNMENTS = ("reverse", "cycle")
 RANK_SLOT_CAPACITY = 3
-SUPPORTED_UPDATE_RULES = {"rank_slot_rule_cued", "relative_rank_rule_cued"}
+SUPPORTED_UPDATE_RULES = {"rank_slot_rule_cued", "rank_slot_repair_rule_cued", "relative_rank_rule_cued"}
 
 
 def summarize_assignment(
